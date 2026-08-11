@@ -20,7 +20,7 @@ DEFAULT_PARAMS = {
     "token_string": "TOK",
     "caption_prefix": "",
     "use_face_detection_instead": False,
-    "max_train_steps": 1000,
+    "max_train_steps": 1500,
     "is_lora": True,
     "lora_lr": 1e-4,
     "resolution": 1024,
