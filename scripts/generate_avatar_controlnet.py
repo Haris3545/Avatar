@@ -35,7 +35,7 @@ def main():
     parser.add_argument(
         "--lora-scale",
         type=float,
-        default=1.1,
+        default=1.0,
         help="how strongly the trained style LoRA pulls the output toward flat/graphic vs. the base model's realism, 0-2",
     )
     parser.add_argument(
