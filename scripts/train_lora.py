@@ -65,7 +65,7 @@ def main():
 
     training = replicate.trainings.create(
         model="stability-ai/sdxl",
-        version="7762fd07cf82c948538e41f63f77d685e02b063e37e496e96eefd46c929f9bd",
+        version="7762fd07cf82c948538e41f63f77d685e02b063e37e496e96eefd46c929f9bdc",
         input={
             "input_images": uploaded.urls["get"],
             "token_string": DEFAULT_PARAMS["token_string"],
