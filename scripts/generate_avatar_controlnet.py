@@ -39,24 +39,37 @@ def main():
         help="how strongly the trained style LoRA pulls the output toward flat/graphic vs. the base model's realism, 0-2",
     )
     parser.add_argument(
-        "--crop-fraction",
+        "--crop-top",
         type=float,
-        default=0.6,
-        help="keep this fraction of the photo's height from the top, to crop out excess torso before generation "
-        "(matches the tighter head-and-shoulders framing of the training avatars)",
+        default=0.10,
+        help="discard this fraction of the photo's height from the top, to remove excess headroom above the head",
+    )
+    parser.add_argument(
+        "--crop-bottom",
+        type=float,
+        default=0.62,
+        help="keep down to this fraction of the photo's height (measured from the original top), "
+        "to crop out excess torso before generation",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="fixed seed so re-runs with tweaked params are comparable instead of randomly varying",
     )
     parser.add_argument(
         "--prompt",
         default="TOK style, monochrome black and white line art portrait illustration, "
-        "pure black ink outline on solid white background, "
+        "pure solid white background, no background detail, "
         "flat solid black fills, minimal occasional cross-hatching only, mostly flat shapes, "
         "simple graphic dot eyes, simplified cartoon facial features, no fine detail, "
         "no gradients, halftone dot texture only on beard and jaw shadow, "
-        "graphic vector illustration, no photorealism, head and shoulders portrait crop",
+        "graphic vector illustration, no photorealism, centered head and shoulders portrait crop",
     )
     parser.add_argument(
         "--negative-prompt",
         default="photo, photorealistic, color, colour, coloured, tinted, gradient background, "
+        "grey background, dark background, textured background, visible wall, chalkboard, vignette, "
         "sepia, muted tones, painterly, blurry, low quality, grayscale photo, "
         "realistic eyes, detailed iris, photorealistic skin texture, dense stippling, "
         "intricate fine detail, engraving texture, fabric texture detail, full body, torso, waist",
@@ -69,10 +82,10 @@ def main():
 
     import replicate
 
-    print(f"Cropping photo to top {int(args.crop_fraction * 100)}% (head and shoulders)...")
+    print(f"Cropping photo to {int(args.crop_top * 100)}%-{int(args.crop_bottom * 100)}% of height...")
     im = Image.open(photo_path).convert("RGB")
     w, h = im.size
-    im = im.crop((0, 0, w, int(h * args.crop_fraction)))
+    im = im.crop((0, int(h * args.crop_top), w, int(h * args.crop_bottom)))
     buf = io.BytesIO()
     im.save(buf, format="JPEG", quality=92)
     buf.seek(0)
@@ -82,7 +95,7 @@ def main():
     uploaded = replicate.files.create(buf)
     photo_url = uploaded.urls["get"]
 
-    print(f"Generating with {MODEL} (canny ControlNet + LoRA)...")
+    print(f"Generating with {MODEL} (canny ControlNet + LoRA, seed={args.seed})...")
     output = replicate.run(
         MODEL,
         input={
@@ -94,6 +107,7 @@ def main():
             "condition_scale": args.condition_scale,
             "num_inference_steps": 40,
             "refine_steps": 20,
+            "seed": args.seed,
         },
     )
 
