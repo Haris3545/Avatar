@@ -63,7 +63,7 @@ def main():
         "pure solid white background, no background detail, "
         "flat solid black fills, minimal occasional cross-hatching only, mostly flat shapes, "
         "simple graphic dot eyes, simplified cartoon facial features, no fine detail, "
-        "no gradients, halftone dot texture only on beard and jaw shadow, "
+        "no gradients, halftone dot texture used sparingly only where the actual photo shows it, "
         "graphic vector illustration, no photorealism, centered head and shoulders portrait crop",
     )
     parser.add_argument(
@@ -74,7 +74,17 @@ def main():
         "realistic eyes, detailed iris, photorealistic skin texture, dense stippling, "
         "intricate fine detail, engraving texture, fabric texture detail, full body, torso, waist",
     )
+    parser.add_argument(
+        "--clean-shaven",
+        action="store_true",
+        help="this person has no beard/stubble in the photo -- explicitly suppress the model's learned "
+        "tendency to add jaw/beard texture regardless of the actual photo",
+    )
     args = parser.parse_args()
+
+    negative_prompt = args.negative_prompt
+    if args.clean_shaven:
+        negative_prompt += ", beard, facial hair, stubble, goatee, moustache, mustache, five o'clock shadow"
 
     photo_path = Path(args.photo)
     if not photo_path.exists():
@@ -101,7 +111,7 @@ def main():
         input={
             "image": photo_url,
             "prompt": args.prompt,
-            "negative_prompt": args.negative_prompt,
+            "negative_prompt": negative_prompt,
             "lora_weights": args.lora_weights,
             "lora_scale": args.lora_scale,
             "condition_scale": args.condition_scale,
