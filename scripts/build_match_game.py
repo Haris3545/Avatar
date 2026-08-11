@@ -36,7 +36,13 @@ def score(a: str, b: str) -> float:
 def thumb_data_uri(path: Path, size=160) -> str | None:
     try:
         im = Image.open(path)
-        im = im.convert("RGB")
+        if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+            im = im.convert("RGBA")
+            bg = Image.new("RGB", im.size, (255, 255, 255))
+            bg.paste(im, mask=im.split()[-1])
+            im = bg
+        else:
+            im = im.convert("RGB")
         im.thumbnail((size, size))
         buf = io.BytesIO()
         im.save(buf, format="JPEG", quality=72)
