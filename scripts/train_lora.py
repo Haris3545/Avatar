@@ -69,11 +69,13 @@ def main():
         input={
             "input_images": uploaded.urls["get"],
             "input_images_filetype": "zip",
+            "autocaption": False,  # use our own .txt captions instead of BLIP auto-captioning
             "token_string": DEFAULT_PARAMS["token_string"],
             "max_train_steps": args.steps,
             "is_lora": True,
             "lora_lr": args.lr,
             "resolution": DEFAULT_PARAMS["resolution"],
+            "crop_based_on_salience": False,  # dataset is already uniformly cropped/composited
         },
         destination=args.destination,
     )
