@@ -23,14 +23,15 @@ def main():
     parser.add_argument(
         "--strength",
         type=float,
-        default=0.65,
+        default=0.85,
         help="img2img prompt_strength: lower stays closer to the photo, higher restyles more freely (0-1)",
     )
     parser.add_argument(
         "--prompt",
-        default="TOK style, black and white line art portrait illustration, thin clean outline, "
-        "minimal flat shading, halftone dot texture on beard and shadow areas, "
-        "simplified facial features, white background",
+        default="TOK style, monochrome black and white line art portrait illustration, "
+        "pure black ink outline on solid white background, thin clean outline, "
+        "flat two-tone shading only, no gradients, halftone dot texture on beard and shadow areas, "
+        "simplified facial features, graphic vector illustration, no photorealism",
     )
     args = parser.parse_args()
 
@@ -50,7 +51,8 @@ def main():
         args.lora,
         input={
             "prompt": args.prompt,
-            "negative_prompt": "photo, photorealistic, color, colour, blurry, low quality",
+            "negative_prompt": "photo, photorealistic, color, colour, coloured, tinted, gradient background, "
+            "sepia, muted tones, painterly, blurry, low quality, grayscale photo",
             "image": photo_url,
             # lower = stays closer to the input photo's structure/pose,
             # higher = more freedom to restyle. 0.6-0.7 is a reasonable start.
