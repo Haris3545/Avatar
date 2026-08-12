@@ -64,8 +64,6 @@ def main():
         "flat solid black fills, minimal occasional cross-hatching only, mostly flat shapes, "
         "simple graphic dot eyes, simplified cartoon facial features, no fine detail, "
         "no gradients, halftone dot texture used sparingly only where the actual photo shows it, "
-        "clothing rendered as a single flat solid grey shape with no pattern or print, "
-        "clean simple outlines throughout, no stray marks, "
         "graphic vector illustration, no photorealism, centered head and shoulders portrait crop",
     )
     parser.add_argument(
@@ -74,9 +72,7 @@ def main():
         "grey background, dark background, textured background, visible wall, chalkboard, vignette, "
         "sepia, muted tones, painterly, blurry, low quality, grayscale photo, "
         "realistic eyes, detailed iris, photorealistic skin texture, dense stippling, "
-        "intricate fine detail, engraving texture, fabric texture detail, full body, torso, waist, "
-        "fabric pattern, floral print, patterned clothing, busy pattern, textile print, "
-        "noisy texture, stray marks, scribble artifacts, speckled noise",
+        "intricate fine detail, engraving texture, fabric texture detail, full body, torso, waist",
     )
     parser.add_argument(
         "--clean-shaven",
