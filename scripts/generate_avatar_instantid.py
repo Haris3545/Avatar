@@ -98,8 +98,8 @@ def main():
     photo_url = uploaded.urls["get"]
 
     print(f"Generating with {MODEL} (InstantID + depth ControlNet + LoRA)...")
-    output = replicate.run(
-        MODEL,
+    prediction = replicate.predictions.create(
+        model=MODEL,
         input={
             "image": photo_url,
             "style": "3D",  # required enum, but custom_lora_url overrides the actual style used
@@ -113,10 +113,23 @@ def main():
             "seed": args.seed,
         },
     )
+    print(f"Prediction: https://replicate.com/p/{prediction.id}")
+    prediction.wait()
+
+    print(f"Status: {prediction.status}")
+    if prediction.status != "succeeded":
+        print(f"Logs:\n{prediction.logs}")
+        sys.exit(f"Prediction did not succeed (status={prediction.status}): {prediction.error}")
+
+    output = prediction.output
+    if not output:
+        print(f"Logs:\n{prediction.logs}")
+        sys.exit("Prediction succeeded but returned no output -- see logs above")
 
     result = output[0] if isinstance(output, list) else output
-    with open(args.out, "wb") as f:
-        f.write(result.read())
+    import urllib.request
+
+    urllib.request.urlretrieve(result, args.out)
 
     print(f"Saved to {args.out}")
 
