@@ -1,0 +1,41 @@
+name: Deploy patched face-to-many to Replicate
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_name:
+        required: true
+        default: "haris3545/face-to-many-patched"
+        description: "Destination Replicate model, e.g. username/modelname. Must already exist on Replicate (create it at replicate.com/create first)."
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -a -f
+          df -h
+
+      - name: Setup Cog
+        uses: replicate/setup-cog@v2
+        with:
+          token: ${{ secrets.REPLICATE_CLI_AUTH_TOKEN }}
+
+      - name: Fetch ComfyUI at pinned commit
+        working-directory: vendor/cog-face-to-many
+        run: |
+          git clone https://github.com/comfyanonymous/ComfyUI.git ComfyUI
+          cd ComfyUI && git checkout 37a86e4618098ef1e0d692d0953f072388cbc673
+
+      - name: Install ComfyUI custom node plugins
+        working-directory: vendor/cog-face-to-many
+        run: ./scripts/clone_plugins.sh
+
+      - name: Push to Replicate
+        working-directory: vendor/cog-face-to-many
+        run: cog push r8.im/${{ inputs.model_name }}

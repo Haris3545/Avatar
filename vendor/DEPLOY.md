@@ -11,48 +11,37 @@ URL ending in `/trained_model.tar`, regardless of bucket segment. No other
 behavior changes.
 
 This needs to be built and pushed as your own Replicate model, since we
-can't modify fofr's hosted copy. **This step can't run from this sandbox**
-(no Docker, and Replicate's build/registry endpoints are network-blocked
-here) -- it needs to run on your machine.
+can't modify fofr's hosted copy. Building it needs Docker, which isn't
+available either in this sandbox (network-blocked from Replicate's
+registry) or apparently on your machine (can't install Docker Desktop) --
+so **this runs in GitHub Actions instead**, which gives us a Docker-capable
+machine with unrestricted internet, without touching your laptop at all.
 
-## Requirements
+## One-time setup
 
-- Docker Desktop installed and running (https://www.docker.com/products/docker-desktop/)
-- ~15-20GB free disk space (the image includes CUDA + torch + several ML
-  libraries)
-- Expect the build to take a while (looks like large images) — this is a
-  one-time cost, not something you'll redo often
-- No local GPU needed for the build itself — Cog builds the container image
-  on CPU; the model only needs a GPU when it actually *runs* on Replicate
+1. **Create the destination model on Replicate** (same as we did for LoRA
+   training): go to [replicate.com/create](https://replicate.com/create),
+   name it e.g. `face-to-many-patched`, set it **Private**.
 
-## Steps
+2. **Get a Cog CLI auth token** (different from the `r8_...` API token
+   you've been using) at
+   [replicate.com/auth/token](https://replicate.com/auth/token).
 
-```bash
-# 1. Install Cog (Replicate's build tool)
-brew install cog
-# if brew doesn't have it, see https://github.com/replicate/cog#install
+3. **Add it as a GitHub Actions secret**: on the repo on GitHub, go to
+   Settings → Secrets and variables → Actions → New repository secret.
+   Name it `REPLICATE_CLI_AUTH_TOKEN`, paste the token from step 2.
 
-# 2. Log in with the same Replicate API token you've been using
-cog login
+## Running the deploy
 
-# 3. Go to the forked model directory
-cd vendor/cog-face-to-many
+Go to the repo on GitHub → **Actions** tab → **"Deploy patched
+face-to-many to Replicate"** in the left sidebar → **Run workflow** button.
+Confirm the `model_name` input matches what you created in step 1 (e.g.
+`haris3545/face-to-many-patched`), then run it.
 
-# 4. Pull in ComfyUI at the exact pinned commit the model needs
-#    (the original repo uses this as a git submodule; since we vendored
-#    plain files rather than the original .git history, fetch it directly)
-git clone https://github.com/comfyanonymous/ComfyUI.git ComfyUI
-cd ComfyUI && git checkout 37a86e4618098ef1e0d692d0953f072388cbc673 && cd ..
-
-# 5. Install the ComfyUI custom node plugins the model depends on
-./scripts/clone_plugins.sh
-
-# 6. Push it to your own Replicate account as a new model
-#    (create the destination model first at replicate.com/create,
-#    same as we did for the LoRA training destination -- name it
-#    something like "face-to-many-patched", set it Private)
-cog push r8.im/haris3545/face-to-many-patched
-```
+It'll build the image (several GB of CUDA/torch/ML dependencies -- expect
+it to take a while) and push it to Replicate. Watch the run's logs in the
+Actions tab; once it finishes it'll print a version hash in the `cog push`
+step output. That's what gets plugged into the generation script next.
 
 `cog push` builds the Docker image locally and uploads it to Replicate,
 which then hosts it on GPU hardware for actual predictions -- so build
