@@ -92,6 +92,13 @@ def main():
         required=True,
         help="URL to your trained LoRA weights .tar (from scripts/get_lora_weights_url.py)",
     )
+    parser.add_argument(
+        "--control-image",
+        help="Optional separate image (e.g. scripts/composite_line_art.py output) used only "
+        "for depth/structure conditioning. The main photo is still used for InstantID's "
+        "facial identity embedding, which needs real photographic features and fails on a "
+        "pure line-art image. Requires the redeployed patched model with a second image input.",
+    )
     parser.add_argument("--out", default="avatar_out_iid.png", help="Where to save the result")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -182,11 +189,22 @@ def main():
         uploaded = replicate.files.create(f)
     photo_url = uploaded.urls["get"]
 
+    predict_input = {"image": photo_url}
+
+    if args.control_image:
+        control_path = Path(args.control_image)
+        if not control_path.exists():
+            sys.exit(f"Control image not found: {control_path}")
+        print("Uploading control image...")
+        with open(control_path, "rb") as f:
+            uploaded_control = replicate.files.create(f)
+        predict_input["control_image"] = uploaded_control.urls["get"]
+
     print(f"Generating with {MODEL} (InstantID + depth ControlNet + LoRA)...")
     prediction = replicate.predictions.create(
         version=MODEL,
         input={
-            "image": photo_url,
+            **predict_input,
             "style": "3D",  # required enum, but custom_lora_url overrides the actual style used
             "prompt": args.prompt,
             "negative_prompt": negative_prompt,

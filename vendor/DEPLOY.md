@@ -1,14 +1,29 @@
 # Deploying our patched fork of fofr/face-to-many
 
 `vendor/cog-face-to-many` is a fork of https://github.com/fofr/cog-face-to-many
-with one fix: the original `custom_lora_url` validation only accepted LoRA
-weights hosted at `replicate.delivery/pbxt/...`, but Replicate now routes
-different accounts to different CDN bucket segments (ours is `xezq`, not
-`pbxt`) -- so the hosted model rejects our correctly-working trained LoRA
-URL. The patch (see `predict.py`, `parse_custom_lora_url` and the validation
-block in `predict()`) generalizes both to accept any `replicate.delivery`
-URL ending in `/trained_model.tar`, regardless of bucket segment. No other
-behavior changes.
+with two fixes:
+
+1. The original `custom_lora_url` validation only accepted LoRA weights
+   hosted at `replicate.delivery/pbxt/...`, but Replicate now routes
+   different accounts to different CDN bucket segments (ours is `xezq`, not
+   `pbxt`) -- so the hosted model rejects our correctly-working trained
+   LoRA URL. The patch (see `predict.py`, `parse_custom_lora_url` and the
+   validation block in `predict()`) generalizes both to accept any
+   `replicate.delivery` URL ending in `/trained_model.tar`, regardless of
+   bucket segment.
+
+2. A new optional `control_image` input. Previously the single `image`
+   input fed both InstantID's facial identity embedding *and* the depth
+   ControlNet's structure conditioning, since both derived from the same
+   workflow node. That meant we couldn't swap in a separately-generated
+   structure map (e.g. `scripts/composite_line_art.py`'s output) without
+   also breaking face detection -- InstantID needs a real photo to find a
+   face in, and a pure line-art composite has none. The patch adds a
+   second `LoadImage` + resize branch (nodes 100/101 in
+   `face-to-many-api.json`) that feeds only the depth preprocessor (node
+   49); `image` still feeds InstantID (via node 67) for identity. When
+   `control_image` is omitted, it defaults to the same photo as `image`,
+   so old single-image behavior is unchanged.
 
 This needs to be built and pushed as your own Replicate model, since we
 can't modify fofr's hosted copy. Building it needs Docker, which isn't

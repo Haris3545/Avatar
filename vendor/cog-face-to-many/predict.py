@@ -62,18 +62,18 @@ class Predictor(BasePredictor):
                 shutil.rmtree(directory)
             os.makedirs(directory)
 
-    def handle_input_file(self, input_file: Path):
+    def handle_input_file(self, input_file: Path, prefix: str = "input"):
         file_extension = os.path.splitext(input_file)[1].lower()
 
         if file_extension in [".png", ".webp", ".gif"]:
-            filename = f"input{file_extension}"
+            filename = f"{prefix}{file_extension}"
             shutil.copy(input_file, os.path.join(INPUT_DIR, filename))
         else:
             # If the file is jpg, jpeg or unknown, convert to png
             # We convert jpgs so that we remove any EXIF data related to HDR images – ComfyUI cannot load HDR images at the moment: https://github.com/fofr/cog-face-to-many/issues/1
             # Alternatively, if there is no file extension, like a base64 image
             # we'll try saving it as a PNG
-            filename = "input.png"
+            filename = f"{prefix}.png"
             image = Image.open(input_file)
 
             try:
@@ -128,6 +128,13 @@ class Predictor(BasePredictor):
         load_image = workflow["22"]["inputs"]
         load_image["image"] = kwargs["filename"]
 
+        # Node 100 feeds only the depth ControlNet preprocessor (node 49);
+        # node 22/67 (the real photo) still feeds ApplyInstantID (node 41)
+        # for facial identity. Defaults to the same photo when no separate
+        # control image is supplied, preserving old single-image behaviour.
+        control_load_image = workflow["100"]["inputs"]
+        control_load_image["image"] = kwargs["control_filename"]
+
         loader = workflow["2"]["inputs"]
         loader["positive"] = prompt
         loader["negative"] = negative_prompt
@@ -181,6 +188,13 @@ class Predictor(BasePredictor):
             description="An image of a person to be converted",
             default=None,
         ),
+        control_image: Path = Input(
+            description="Optional separate image used only for depth/structure "
+            "conditioning (e.g. a stylized line-art composite), while `image` "
+            "still supplies facial identity via InstantID. If omitted, `image` "
+            "is used for both.",
+            default=None,
+        ),
         style: str = Input(
             default="3D",
             choices=LORA_TYPES,
@@ -229,7 +243,12 @@ class Predictor(BasePredictor):
         if image is None:
             raise ValueError("No image provided")
 
-        filename = self.handle_input_file(image)
+        filename = self.handle_input_file(image, prefix="face")
+        control_filename = (
+            self.handle_input_file(control_image, prefix="control")
+            if control_image is not None
+            else filename
+        )
         if custom_lora_url is not None:
             # Accept any replicate.delivery-hosted trained_model.tar, not just the
             # legacy "pbxt" bucket -- see parse_custom_lora_url for why.
@@ -251,6 +270,7 @@ class Predictor(BasePredictor):
         self.update_workflow(
             workflow,
             filename=filename,
+            control_filename=control_filename,
             style=style,
             denoising_strength=denoising_strength,
             seed=seed,

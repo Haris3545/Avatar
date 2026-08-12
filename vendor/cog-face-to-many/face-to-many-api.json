@@ -392,7 +392,7 @@
       "preprocessor": "MiDaS-DepthMapPreprocessor",
       "resolution": 512,
       "image": [
-        "67",
+        "101",
         0
       ]
     },
@@ -431,7 +431,34 @@
     },
     "class_type": "ImageResize+",
     "_meta": {
-      "title": "🔧 Image Resize"
+      "title": "\ud83d\udd27 Image Resize"
+    }
+  },
+  "100": {
+    "inputs": {
+      "image": "Screenshot 2024-02-26 at 16.13.24.png",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Control Image"
+    }
+  },
+  "101": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "interpolation": "nearest",
+      "keep_proportion": true,
+      "condition": "always",
+      "image": [
+        "100",
+        0
+      ]
+    },
+    "class_type": "ImageResize+",
+    "_meta": {
+      "title": "\ud83d\udd27 Image Resize (control)"
     }
   }
 }
