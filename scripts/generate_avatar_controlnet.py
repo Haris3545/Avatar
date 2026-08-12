@@ -12,7 +12,7 @@ import io
 import sys
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 MODEL = "fermatresearch/sdxl-controlnet-lora:3bb13fe1c33c35987b33792b01b71ed6529d03f165d1c2416375859f09ca9fef"
 
@@ -37,6 +37,14 @@ def main():
         type=float,
         default=1.0,
         help="how strongly the trained style LoRA pulls the output toward flat/graphic vs. the base model's realism, 0-2",
+    )
+    parser.add_argument(
+        "--blur",
+        type=float,
+        default=6.0,
+        help="Gaussian blur radius applied before edge detection, to suppress fine texture "
+        "(wrinkles, fabric pattern, hair strands, mouth creases) while keeping major structural "
+        "edges (face outline, glasses, jaw, hairline). 0 disables.",
     )
     parser.add_argument(
         "--crop-top",
@@ -64,6 +72,7 @@ def main():
         "flat solid black fills, minimal occasional cross-hatching only, mostly flat shapes, "
         "simple graphic dot eyes, simplified cartoon facial features, no fine detail, "
         "no gradients, halftone dot texture used sparingly only where the actual photo shows it, "
+        "closed mouth gentle smile, "
         "graphic vector illustration, no photorealism, centered head and shoulders portrait crop",
     )
     parser.add_argument(
@@ -71,6 +80,7 @@ def main():
         default="photo, photorealistic, color, colour, coloured, tinted, gradient background, "
         "grey background, dark background, textured background, visible wall, chalkboard, vignette, "
         "sepia, muted tones, painterly, blurry, low quality, grayscale photo, "
+        "open mouth, teeth, tongue, "
         "realistic eyes, detailed iris, photorealistic skin texture, dense stippling, "
         "intricate fine detail, engraving texture, fabric texture detail, full body, torso, waist",
     )
@@ -96,6 +106,9 @@ def main():
     im = Image.open(photo_path).convert("RGB")
     w, h = im.size
     im = im.crop((0, int(h * args.crop_top), w, int(h * args.crop_bottom)))
+    if args.blur > 0:
+        print(f"Applying blur (radius={args.blur}) before edge detection...")
+        im = im.filter(ImageFilter.GaussianBlur(radius=args.blur))
     buf = io.BytesIO()
     im.save(buf, format="JPEG", quality=92)
     buf.seek(0)
