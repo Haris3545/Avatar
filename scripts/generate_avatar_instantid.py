@@ -23,15 +23,27 @@ from PIL import Image, ImageDraw
 MODEL = "haris3545/face-to-many-patched:2f26886c521b71658dfaa2b71a8f116b8626a1d9f7e641dd0025f966056ee5dc"
 
 
-def whiten_background(path: Path, thresh: int = 45) -> None:
-    """Flood-fill the background to white from multiple border seed points,
-    since prompting for a white background has been unreliable (the model
-    keeps rendering a dark/vignetted background regardless of wording or
-    parameters). Seeded from many border points rather than just the
-    corners to handle a gradient/vignette background that a single seed's
-    color-distance threshold wouldn't fully cover."""
+def _color_dist(a, b):
+    return sum((a[i] - b[i]) ** 2 for i in range(3)) ** 0.5
+
+
+def whiten_background(path: Path, thresh: int = 45, grid_step: int = 12) -> Image.Image:
+    """Flood-fill the background to white, since prompting for a white
+    background has been unreliable (the model keeps rendering a
+    dark/vignetted background regardless of wording or parameters).
+
+    Two passes:
+    1. Border-seeded flood fill for the main open background.
+    2. A grid scan over the whole image that flood-fills any remaining
+       pixel close to the original background tone -- catches pockets of
+       background enclosed by the subject's own outline (e.g. between an
+       arm and the torso) that a border seed can't reach through, since
+       flood fill only spreads through pixels connected to the seed.
+    """
     im = Image.open(path).convert("RGB")
     w, h = im.size
+    bg_ref = im.getpixel((0, 0))
+
     seeds = [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]
     for frac in (0.1, 0.25, 0.5, 0.75, 0.9):
         seeds += [
@@ -43,7 +55,33 @@ def whiten_background(path: Path, thresh: int = 45) -> None:
     for seed in seeds:
         if im.getpixel(seed) != (255, 255, 255):
             ImageDraw.floodfill(im, seed, (255, 255, 255), thresh=thresh)
+
+    for y in range(0, h, grid_step):
+        for x in range(0, w, grid_step):
+            px = im.getpixel((x, y))
+            if px != (255, 255, 255) and _color_dist(px, bg_ref) <= thresh:
+                ImageDraw.floodfill(im, (x, y), (255, 255, 255), thresh=thresh)
+
     im.save(path)
+    return im
+
+
+def crop_to_shoulders(path: Path, keep_fraction: float = 0.72) -> None:
+    """Crop to the subject's actual bounding box (against a white
+    background) and cut off the bottom portion, since the model has been
+    consistently framing too much torso and too much empty headroom above
+    the head instead of a tight head-and-shoulders crop."""
+    from PIL import ImageChops
+
+    im = Image.open(path).convert("RGB")
+    bg = Image.new("RGB", im.size, (255, 255, 255))
+    bbox = ImageChops.difference(im, bg).getbbox()
+    if not bbox:
+        return
+    left, top, right, bottom = bbox
+    content_height = bottom - top
+    new_bottom = min(top + int(content_height * keep_fraction), im.height)
+    im.crop((left, top, right, new_bottom)).save(path)
 
 
 def main():
@@ -125,8 +163,11 @@ def main():
     args = parser.parse_args()
 
     if args.no_facial_hair:
-        args.prompt += ", no visible facial hair, clean shaven jawline"
-        args.negative_prompt += ", beard, facial hair, stubble, goatee, moustache, mustache"
+        args.prompt += ", no visible facial hair, completely smooth clean shaven jawline and neck"
+        args.negative_prompt += (
+            ", beard, facial hair, stubble, goatee, moustache, mustache, beard shadow, "
+            "beard, facial hair, stubble"  # repeated for extra negative-prompt weight
+        )
 
     negative_prompt = args.negative_prompt
 
@@ -179,6 +220,8 @@ def main():
     if not args.no_whiten_background:
         print("Whitening background...")
         whiten_background(Path(args.out))
+        print("Cropping to head and shoulders...")
+        crop_to_shoulders(Path(args.out))
 
     print(f"Saved to {args.out}")
 
