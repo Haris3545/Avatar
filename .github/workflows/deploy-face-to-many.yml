@@ -15,6 +15,9 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v4
 
+      - name: Confirm runner architecture
+        run: uname -m
+
       - name: Free up disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
@@ -54,6 +57,14 @@ jobs:
 
       - name: Push to Replicate
         working-directory: vendor/cog-face-to-many
+        env:
+          # The containerd-snapshotter change fixed "unknown blob" but the
+          # image that got built/pushed ended up as the wrong CPU
+          # architecture ("exec /sbin/tini: exec format error" when Docker
+          # tried to run it) -- force amd64 explicitly rather than rely on
+          # auto-detection, which is apparently not reliable with the
+          # snapshotter enabled.
+          DOCKER_DEFAULT_PLATFORM: linux/amd64
         # cog push has been hitting "unknown blob" -- a Docker registry race
         # condition on layer uploads that a concurrency-limit config change
         # didn't fix, so retry a few times; these races often clear up on
