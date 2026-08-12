@@ -13,10 +13,13 @@ OUT_ZIP = ROOT / "data" / "lora_dataset.zip"
 
 TARGET_SIZE = 1024
 CAPTION = (
-    "TOK style, black and white graphic portrait illustration, confident thin black ink outline, "
-    "large areas of solid flat color fill, very simplified minimal facial features, "
+    "TOK style, black and white graphic icon portrait illustration, confident thin black ink outline, "
+    "hair rendered as one flat solid black shape with only 2-3 defining strand lines, no individual hair "
+    "strand texture, clothing rendered as one flat solid grey shape with no fabric pattern or fold detail, "
+    "eyes as simple small dots, eyebrows as single flat curved lines, nose as a short simple line, "
+    "very few total linework strokes, large uninterrupted flat fill areas, "
     "sparse selective halftone dot texture used only where the artwork shows it, "
-    "flat white background, no fine detail, no photorealistic shading"
+    "flat white background, no fine detail, no photorealistic shading, no cross-hatching over large areas"
 )
 
 
