@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DATASET_ZIP = ROOT / "data" / "lora_dataset.zip"
 RUNS_LOG = ROOT / "data" / "training_runs.json"
-MAX_RUNS = 4
+MAX_RUNS = 5  # raised from the original 4-run cap -- explicitly authorized for one more run
 
 DEFAULT_PARAMS = {
     "input_images": None,  # filled in with an uploaded file URL at runtime

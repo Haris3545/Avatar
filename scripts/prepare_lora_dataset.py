@@ -13,13 +13,23 @@ OUT_ZIP = ROOT / "data" / "lora_dataset.zip"
 
 TARGET_SIZE = 1024
 CAPTION = (
-    "TOK style, black and white graphic icon portrait illustration, confident thin black ink outline, "
-    "hair rendered as one flat solid black shape with only 2-3 defining strand lines, no individual hair "
-    "strand texture, clothing rendered as one flat solid grey shape with no fabric pattern or fold detail, "
-    "eyes as simple small dots, eyebrows as single flat curved lines, nose as a short simple line, "
-    "very few total linework strokes, large uninterrupted flat fill areas, "
-    "sparse selective halftone dot texture used only where the artwork shows it, "
-    "flat white background, no fine detail, no photorealistic shading, no cross-hatching over large areas"
+    "TOK style, black and white graphic icon portrait illustration. "
+    "Extremely minimal linework: as few individual strokes as possible for the whole image. "
+    "Every outline stroke is thick, with fully rounded ends (rounded line caps), never thin or tapering "
+    "at the ends of the main outline. "
+    "Eyes are constructed from just two marks: one small solid dot for the pupil, and one short curved "
+    "arc above it for the top eyelid -- no other eye detail, no bottom lid, no eyelashes. "
+    "Eyebrows are a single thick flat curved stroke. Nose is one short simple line or small curve. "
+    "Hair is a small number of long strokes, each one tapering to a fine point at its tip, drawn over "
+    "a solid flat black hair shape -- the taper is a deliberate contrast to the uniformly thick rounded "
+    "outline used everywhere else on the face and body. "
+    "Clothing is one flat solid black silhouette shape with a simple outlined collar, no fabric folds, "
+    "no pattern, no texture -- the clothing silhouette is cropped just below the shoulders. "
+    "Halftone dot shading is used only as a deliberate stylistic texture in specific areas like a beard "
+    "or hair volume, never as general shading. "
+    "Large, uninterrupted flat white or flat black fill areas dominate the image -- there is no "
+    "cross-hatching, no gradients, and no fine surface detail anywhere. "
+    "Flat white background."
 )
 
 
