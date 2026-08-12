@@ -18,7 +18,32 @@ import argparse
 import sys
 from pathlib import Path
 
+from PIL import Image, ImageDraw
+
 MODEL = "haris3545/face-to-many-patched:2f26886c521b71658dfaa2b71a8f116b8626a1d9f7e641dd0025f966056ee5dc"
+
+
+def whiten_background(path: Path, thresh: int = 45) -> None:
+    """Flood-fill the background to white from multiple border seed points,
+    since prompting for a white background has been unreliable (the model
+    keeps rendering a dark/vignetted background regardless of wording or
+    parameters). Seeded from many border points rather than just the
+    corners to handle a gradient/vignette background that a single seed's
+    color-distance threshold wouldn't fully cover."""
+    im = Image.open(path).convert("RGB")
+    w, h = im.size
+    seeds = [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]
+    for frac in (0.1, 0.25, 0.5, 0.75, 0.9):
+        seeds += [
+            (int(w * frac), 0),
+            (int(w * frac), h - 1),
+            (0, int(h * frac)),
+            (w - 1, int(h * frac)),
+        ]
+    for seed in seeds:
+        if im.getpixel(seed) != (255, 255, 255):
+            ImageDraw.floodfill(im, seed, (255, 255, 255), thresh=thresh)
+    im.save(path)
 
 
 def main():
@@ -91,6 +116,12 @@ def main():
         "to render jaw shadow as facial hair. Not a permanent default: pass this per-photo based on "
         "what the photo actually shows (eventually this should be an automated visual check, not manual)",
     )
+    parser.add_argument(
+        "--no-whiten-background",
+        action="store_true",
+        help="skip the post-processing step that flood-fills the background to white "
+        "(the model has been unreliable at rendering white background via prompting alone)",
+    )
     args = parser.parse_args()
 
     if args.no_facial_hair:
@@ -144,6 +175,10 @@ def main():
     import urllib.request
 
     urllib.request.urlretrieve(result, args.out)
+
+    if not args.no_whiten_background:
+        print("Whitening background...")
+        whiten_background(Path(args.out))
 
     print(f"Saved to {args.out}")
 
