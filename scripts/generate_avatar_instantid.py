@@ -98,10 +98,8 @@ def main():
     photo_url = uploaded.urls["get"]
 
     print(f"Generating with {MODEL} (InstantID + depth ControlNet + LoRA)...")
-    model_name, model_version = MODEL.split(":", 1)
     prediction = replicate.predictions.create(
-        model=model_name,
-        version=model_version,
+        version=MODEL,
         input={
             "image": photo_url,
             "style": "3D",  # required enum, but custom_lora_url overrides the actual style used
