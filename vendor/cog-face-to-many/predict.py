@@ -128,10 +128,11 @@ class Predictor(BasePredictor):
         load_image = workflow["22"]["inputs"]
         load_image["image"] = kwargs["filename"]
 
-        # Node 100 feeds only the depth ControlNet preprocessor (node 49);
-        # node 22/67 (the real photo) still feeds ApplyInstantID (node 41)
-        # for facial identity. Defaults to the same photo when no separate
-        # control image is supplied, preserving old single-image behaviour.
+        # Node 100 feeds only the canny-edge ControlNet preprocessor (node
+        # 49); node 22/67 (the real photo) still feeds ApplyInstantID (node
+        # 41) for facial identity. Defaults to the same photo when no
+        # separate control image is supplied, preserving old single-image
+        # behaviour.
         control_load_image = workflow["100"]["inputs"]
         control_load_image["image"] = kwargs["control_filename"]
 
@@ -140,7 +141,7 @@ class Predictor(BasePredictor):
         loader["negative"] = negative_prompt
 
         controlnet = workflow["28"]["inputs"]
-        controlnet["strength"] = kwargs["control_depth_strength"]
+        controlnet["strength"] = kwargs["control_image_strength"]
 
         lora_loader = workflow["3"]["inputs"]
         lora_loader["lora_name_1"] = lora_name
@@ -217,11 +218,13 @@ class Predictor(BasePredictor):
             le=20,
             description="Strength of the prompt. This is the CFG scale, higher numbers lead to stronger prompt, lower numbers will keep more of a likeness to the original.",
         ),
-        control_depth_strength: float = Input(
+        control_image_strength: float = Input(
             default=0.8,
             ge=0,
             le=1,
-            description="Strength of depth controlnet. The bigger this is, the more controlnet affects the output.",
+            description="Strength of the canny-edge ControlNet conditioning on `control_image` "
+            "(or `image` if `control_image` is not supplied). The bigger this is, the more "
+            "strongly the traced edges affect the output.",
         ),
         instant_id_strength: float = Input(
             default=1, description="How strong the InstantID will be.", ge=0, le=1
@@ -280,7 +283,7 @@ class Predictor(BasePredictor):
             instant_id_strength=instant_id_strength,
             lora_url=custom_lora_url,
             lora_scale=lora_scale,
-            control_depth_strength=control_depth_strength,
+            control_image_strength=control_image_strength,
         )
 
         wf = self.comfyUI.load_workflow(workflow, check_weights=False)

@@ -20,10 +20,24 @@ with two fixes:
    also breaking face detection -- InstantID needs a real photo to find a
    face in, and a pure line-art composite has none. The patch adds a
    second `LoadImage` + resize branch (nodes 100/101 in
-   `face-to-many-api.json`) that feeds only the depth preprocessor (node
-   49); `image` still feeds InstantID (via node 67) for identity. When
-   `control_image` is omitted, it defaults to the same photo as `image`,
-   so old single-image behavior is unchanged.
+   `face-to-many-api.json`) that feeds only the ControlNet preprocessor
+   (node 49); `image` still feeds InstantID (via node 67) for identity.
+   When `control_image` is omitted, it defaults to the same photo as
+   `image`, so old single-image behavior is unchanged.
+
+3. Swapped the structure ControlNet from depth to canny. It was originally
+   `depth-zoe-xl-v1.0-controlnet.safetensors` fed by a `MiDaS-DepthMapPreprocessor`
+   -- a depth estimator trained on photos. Fed a line-art composite, MiDaS
+   reads every halftone dot and thin double-stroke as depth noise, and the
+   depth ControlNet then forces the diffusion output to literally
+   reproduce that noise as structure, defeating the point of feeding it a
+   simplified composite in the first place. Node 24 now loads
+   `controlnet-canny-sdxl-1.0.fp16.safetensors` and node 49 uses
+   `CannyEdgePreprocessor`, which traces the boundaries between the
+   composite's flat black/white regions into clean edges -- a much better
+   structural signal for "these are the important lines." The strength
+   input was renamed `control_depth_strength` -> `control_image_strength`
+   to match.
 
 This needs to be built and pushed as your own Replicate model, since we
 can't modify fofr's hosted copy. Building it needs Docker, which isn't

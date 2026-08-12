@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """Generate a VCCP-style avatar using InstantID (face-embedding identity
-preservation) + depth ControlNet + your trained LoRA, via our patched fork
-of fofr/face-to-many (haris3545/face-to-many-patched -- see vendor/DEPLOY.md
-for why: the hosted original rejects our account's replicate.delivery URLs).
+preservation) + canny-edge ControlNet + your trained LoRA, via our patched
+fork of fofr/face-to-many (haris3545/face-to-many-patched -- see
+vendor/DEPLOY.md for why: the hosted original rejects our account's
+replicate.delivery URLs).
 
-Unlike the Canny ControlNet approach, InstantID conditions on a facial
-identity embedding rather than raw pixel edges, and depth conditioning
-doesn't carry fine surface texture (wrinkles, fabric weave) the way Canny
-edges do -- this should avoid the "sharpen structure = also render literal
-photo detail" tradeoff we hit with the Canny pipeline.
+InstantID conditions on a facial identity embedding from the main photo,
+which is what makes it possible to also pass a separate --control-image
+(e.g. scripts/composite_line_art.py's output) purely for canny-edge
+structure conditioning: InstantID's identity embedding still comes from a
+real photo, while the edge structure can come from an already-simplified
+line-art composite instead of the photo's literal detail.
 
 Usage:
     export REPLICATE_API_TOKEN=r8_...
     python3 scripts/generate_avatar_instantid.py path/to/photo.jpg --lora-weights https://.../trained_model.tar
+    # or, with a separate structure composite:
+    python3 scripts/generate_avatar_instantid.py path/to/photo.jpg --control-image composite.png --lora-weights https://.../trained_model.tar
 """
 import argparse
 import sys
@@ -95,7 +99,7 @@ def main():
     parser.add_argument(
         "--control-image",
         help="Optional separate image (e.g. scripts/composite_line_art.py output) used only "
-        "for depth/structure conditioning. The main photo is still used for InstantID's "
+        "for canny-edge structure conditioning. The main photo is still used for InstantID's "
         "facial identity embedding, which needs real photographic features and fails on a "
         "pure line-art image. Requires the redeployed patched model with a second image input.",
     )
@@ -108,10 +112,11 @@ def main():
         help="how strongly facial identity is preserved, 0-1",
     )
     parser.add_argument(
-        "--control-depth-strength",
+        "--control-image-strength",
         type=float,
         default=0.6,
-        help="how strongly depth/pose structure is enforced, 0-1",
+        help="how strongly the canny-edge structure (from --control-image, or the main photo "
+        "if not given) is enforced, 0-1",
     )
     parser.add_argument(
         "--denoising-strength",
@@ -211,7 +216,7 @@ def main():
             "custom_lora_url": args.lora_weights,
             "lora_scale": args.lora_scale,
             "instant_id_strength": args.instant_id_strength,
-            "control_depth_strength": args.control_depth_strength,
+            "control_image_strength": args.control_image_strength,
             "denoising_strength": args.denoising_strength,
             "prompt_strength": args.prompt_strength,
             "seed": args.seed,

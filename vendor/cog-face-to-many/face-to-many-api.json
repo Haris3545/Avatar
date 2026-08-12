@@ -295,7 +295,7 @@
   },
   "24": {
     "inputs": {
-      "control_net_name": "depth-zoe-xl-v1.0-controlnet.safetensors"
+      "control_net_name": "controlnet-canny-sdxl-1.0.fp16.safetensors"
     },
     "class_type": "ControlNetLoader",
     "_meta": {
@@ -389,7 +389,7 @@
   },
   "49": {
     "inputs": {
-      "preprocessor": "MiDaS-DepthMapPreprocessor",
+      "preprocessor": "CannyEdgePreprocessor",
       "resolution": 512,
       "image": [
         "101",
