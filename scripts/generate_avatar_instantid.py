@@ -61,8 +61,9 @@ def main():
         "pure solid white background, no background detail, "
         "flat solid black fills, minimal occasional cross-hatching only, mostly flat shapes, "
         "simple graphic dot eyes, simplified cartoon facial features, no fine detail, "
-        "no gradients, halftone dot texture used sparingly only where the actual photo shows it, "
-        "clothing rendered as one flat solid grey shape with no pattern, closed mouth gentle smile, "
+        "no gradients, halftone dot texture as a stylistic shading device on areas like beard, "
+        "jaw shadow, or hair volume -- matching the reference avatar art style, not the photo's texture, "
+        "clothing rendered as one flat solid black shape with no pattern, warm natural smile, "
         "graphic vector illustration, no photorealism, centered head and shoulders portrait crop",
     )
     parser.add_argument(
@@ -70,21 +71,14 @@ def main():
         default="photo, photorealistic, color, colour, coloured, tinted, gradient background, "
         "grey background, dark background, textured background, visible wall, chalkboard, vignette, "
         "sepia, muted tones, painterly, blurry, low quality, grayscale photo, "
-        "open mouth, teeth, tongue, "
+        "visible teeth, tongue, "
         "realistic eyes, detailed iris, photorealistic skin texture, dense stippling, "
         "intricate fine detail, engraving texture, fabric texture detail, fabric pattern, "
         "floral print, patterned clothing, full body, torso, waist",
     )
-    parser.add_argument(
-        "--clean-shaven",
-        action="store_true",
-        help="explicitly suppress the LoRA's learned tendency to add jaw/beard texture",
-    )
     args = parser.parse_args()
 
     negative_prompt = args.negative_prompt
-    if args.clean_shaven:
-        negative_prompt += ", beard, facial hair, stubble, goatee, moustache, mustache"
 
     photo_path = Path(args.photo)
     if not photo_path.exists():
