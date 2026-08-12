@@ -26,15 +26,17 @@ jobs:
         with:
           token: ${{ secrets.REPLICATE_CLI_AUTH_TOKEN }}
 
-      - name: Limit Docker push concurrency
-        # cog push has been failing with "unknown blob" -- a known Docker
-        # registry race condition where many layers upload in parallel and
-        # the manifest gets finalized before all blobs land, most common on
-        # a brand new/empty model with nothing to reuse. Serializing uploads
-        # avoids the race.
+      - name: Switch to the docker-container buildx driver
+        # cog push was consistently failing with "unknown blob" on every
+        # attempt (not a random race -- the concurrency-limit fix didn't
+        # help either). The build logs show it using the default "docker"
+        # buildx driver, which is meant for local builds/loads, not direct
+        # registry pushes of large multi-layer images -- that's a
+        # documented source of this exact error. The docker-container
+        # driver is the one actually designed to push directly.
         run: |
-          echo '{"max-concurrent-uploads": 1}' | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
+          docker buildx create --name cogbuilder --driver docker-container --use
+          docker buildx inspect --bootstrap
 
       - name: Fetch ComfyUI at pinned commit
         working-directory: vendor/cog-face-to-many
