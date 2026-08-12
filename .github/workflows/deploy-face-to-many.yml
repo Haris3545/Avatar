@@ -48,4 +48,19 @@ jobs:
 
       - name: Push to Replicate
         working-directory: vendor/cog-face-to-many
-        run: cog push r8.im/${{ inputs.model_name }}
+        # cog push has been hitting "unknown blob" -- a Docker registry race
+        # condition on layer uploads that a concurrency-limit config change
+        # didn't fix, so retry a few times; these races often clear up on
+        # their own rather than needing a specific config fix.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            echo "=== cog push attempt $attempt/5 ==="
+            if cog push r8.im/${{ inputs.model_name }}; then
+              echo "Push succeeded on attempt $attempt"
+              exit 0
+            fi
+            echo "Attempt $attempt failed, retrying in 15s..."
+            sleep 15
+          done
+          echo "All 5 push attempts failed"
+          exit 1
