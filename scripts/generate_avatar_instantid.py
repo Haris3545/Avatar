@@ -56,6 +56,13 @@ def main():
         default=1.0,
     )
     parser.add_argument(
+        "--prompt-strength",
+        type=float,
+        default=4.5,
+        help="CFG scale: how strongly both the positive and negative prompt are enforced. "
+        "Model default is 4.5; higher makes negative-prompt suppression (e.g. facial hair) bite harder.",
+    )
+    parser.add_argument(
         "--prompt",
         default="TOK style, monochrome black and white line art portrait illustration, "
         "solid pure white background (like blank white paper), plain white background, no background detail, "
@@ -116,6 +123,7 @@ def main():
             "instant_id_strength": args.instant_id_strength,
             "control_depth_strength": args.control_depth_strength,
             "denoising_strength": args.denoising_strength,
+            "prompt_strength": args.prompt_strength,
             "seed": args.seed,
         },
     )
