@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Generate a VCCP-style avatar using InstantID (face-embedding identity
-preservation) + depth ControlNet + your trained LoRA, via fofr/face-to-many.
+preservation) + depth ControlNet + your trained LoRA, via our patched fork
+of fofr/face-to-many (haris3545/face-to-many-patched -- see vendor/DEPLOY.md
+for why: the hosted original rejects our account's replicate.delivery URLs).
 
 Unlike the Canny ControlNet approach, InstantID conditions on a facial
 identity embedding rather than raw pixel edges, and depth conditioning
@@ -16,7 +18,7 @@ import argparse
 import sys
 from pathlib import Path
 
-MODEL = "fofr/face-to-many:a07f252abbbd832009640b27f063ea52d87d7a23a185ca165bec23b5adc8deaf"
+MODEL = "haris3545/face-to-many-patched:2f26886c521b71658dfaa2b71a8f116b8626a1d9f7e641dd0025f966056ee5dc"
 
 
 def main():
