@@ -38,7 +38,16 @@ cog login
 # 3. Go to the forked model directory
 cd vendor/cog-face-to-many
 
-# 4. Push it to your own Replicate account as a new model
+# 4. Pull in ComfyUI at the exact pinned commit the model needs
+#    (the original repo uses this as a git submodule; since we vendored
+#    plain files rather than the original .git history, fetch it directly)
+git clone https://github.com/comfyanonymous/ComfyUI.git ComfyUI
+cd ComfyUI && git checkout 37a86e4618098ef1e0d692d0953f072388cbc673 && cd ..
+
+# 5. Install the ComfyUI custom node plugins the model depends on
+./scripts/clone_plugins.sh
+
+# 6. Push it to your own Replicate account as a new model
 #    (create the destination model first at replicate.com/create,
 #    same as we did for the LoRA training destination -- name it
 #    something like "face-to-many-patched", set it Private)
