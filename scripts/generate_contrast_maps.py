@@ -5,8 +5,18 @@ entirely on a diffusion model to hallucinate structure it may get wrong
 (e.g. confusing jaw shadow for a beard). No AI involved -- pure classical
 image processing, so it's free and fully repeatable.
 
+On photos with a plain/studio background this works well directly. On
+candid photos with a busy background, run scripts/remove_background.py
+first and pass its output here instead -- plain edge/threshold detection
+can't distinguish background clutter from the subject, and without a
+clean isolated subject the maps pick up the whole scene instead of just
+the person.
+
 Usage:
     python3 scripts/generate_contrast_maps.py path/to/photo.jpg [out_dir]
+    # or, for a busy/candid photo:
+    python3 scripts/remove_background.py path/to/photo.jpg /tmp/nobg.png
+    python3 scripts/generate_contrast_maps.py /tmp/nobg.png [out_dir]
 """
 import sys
 from pathlib import Path
