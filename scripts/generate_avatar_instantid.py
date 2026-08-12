@@ -58,7 +58,7 @@ def main():
     parser.add_argument(
         "--prompt",
         default="TOK style, monochrome black and white line art portrait illustration, "
-        "pure solid white background, no background detail, "
+        "solid pure white background (like blank white paper), plain white background, no background detail, "
         "flat solid black fills, minimal occasional cross-hatching only, mostly flat shapes, "
         "simple graphic dot eyes, simplified cartoon facial features, no fine detail, "
         "no gradients, halftone dot texture as a stylistic shading device on areas like beard, "
@@ -69,14 +69,26 @@ def main():
     parser.add_argument(
         "--negative-prompt",
         default="photo, photorealistic, color, colour, coloured, tinted, gradient background, "
-        "grey background, dark background, textured background, visible wall, chalkboard, vignette, "
+        "grey background, dark background, black background, textured background, visible wall, "
+        "chalkboard, vignette, "
         "sepia, muted tones, painterly, blurry, low quality, grayscale photo, "
         "visible teeth, tongue, "
         "realistic eyes, detailed iris, photorealistic skin texture, dense stippling, "
         "intricate fine detail, engraving texture, fabric texture detail, fabric pattern, "
         "floral print, patterned clothing, full body, torso, waist",
     )
+    parser.add_argument(
+        "--no-facial-hair",
+        action="store_true",
+        help="this specific photo shows no beard/stubble -- suppress the LoRA's learned tendency "
+        "to render jaw shadow as facial hair. Not a permanent default: pass this per-photo based on "
+        "what the photo actually shows (eventually this should be an automated visual check, not manual)",
+    )
     args = parser.parse_args()
+
+    if args.no_facial_hair:
+        args.prompt += ", no visible facial hair, clean shaven jawline"
+        args.negative_prompt += ", beard, facial hair, stubble, goatee, moustache, mustache"
 
     negative_prompt = args.negative_prompt
 
