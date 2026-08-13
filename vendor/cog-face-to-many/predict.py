@@ -155,6 +155,23 @@ class Predictor(BasePredictor):
         sampler["seed"] = kwargs["seed"]
         sampler["cfg"] = kwargs["prompt_strength"]
 
+        # When a mask is supplied, restrict generation to only the masked
+        # region (node 104, VAEEncodeForInpaint) instead of the plain
+        # VAEEncode (node 51) the sampler uses by default -- a ControlNet,
+        # at any strength, only ever nudges the output toward the given
+        # structure; it can't guarantee any of it survives. A hard mask is
+        # the only way to actually lock everything outside it in place
+        # (e.g. a scaffold's measured face/hair shape) while still letting
+        # the model freely generate within the masked area. Node 104 takes
+        # its base pixels from node 101 (the control_image branch), not
+        # node 67 (the real photo) -- the protected, unmasked region must
+        # show the scaffold's actual artwork, not a re-rendering of the
+        # photo, so control_image should be the scaffold itself here.
+        if kwargs.get("mask_filename"):
+            mask_load_image = workflow["102"]["inputs"]
+            mask_load_image["image"] = kwargs["mask_filename"]
+            sampler["latent_image"] = ["104", 0]
+
     def style_to_prompt(self, style, prompt):
         style_prompts = {
             "3D": f"3D Render Style, 3DRenderAF, {prompt}",
@@ -190,10 +207,18 @@ class Predictor(BasePredictor):
             default=None,
         ),
         control_image: Path = Input(
-            description="Optional separate image used only for depth/structure "
-            "conditioning (e.g. a stylized line-art composite), while `image` "
-            "still supplies facial identity via InstantID. If omitted, `image` "
-            "is used for both.",
+            description="Optional separate image used only for canny-edge "
+            "structure conditioning (e.g. a stylized line-art composite), while "
+            "`image` still supplies facial identity via InstantID. If omitted, "
+            "`image` is used for both. Ignored when `mask` is supplied.",
+            default=None,
+        ),
+        mask: Path = Input(
+            description="Optional inpaint mask (white = editable, black = kept "
+            "exactly as in `image`). Restricts generation to the masked region "
+            "only, guaranteeing everything outside it stays pixel-identical to "
+            "`image` -- unlike control_image, which only ever nudges the output "
+            "toward a structure without guaranteeing it survives.",
             default=None,
         ),
         style: str = Input(
@@ -252,6 +277,9 @@ class Predictor(BasePredictor):
             if control_image is not None
             else filename
         )
+        mask_filename = (
+            self.handle_input_file(mask, prefix="mask") if mask is not None else None
+        )
         if custom_lora_url is not None:
             # Accept any replicate.delivery-hosted trained_model.tar, not just the
             # legacy "pbxt" bucket -- see parse_custom_lora_url for why.
@@ -284,6 +312,7 @@ class Predictor(BasePredictor):
             lora_url=custom_lora_url,
             lora_scale=lora_scale,
             control_image_strength=control_image_strength,
+            mask_filename=mask_filename,
         )
 
         wf = self.comfyUI.load_workflow(workflow, check_weights=False)

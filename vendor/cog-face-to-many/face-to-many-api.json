@@ -460,5 +460,49 @@
     "_meta": {
       "title": "\ud83d\udd27 Image Resize (control)"
     }
+  },
+  "102": {
+    "inputs": {
+      "image": "Screenshot 2024-02-26 at 16.13.24.png",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Inpaint Mask"
+    }
+  },
+  "103": {
+    "inputs": {
+      "channel": "red",
+      "image": [
+        "102",
+        0
+      ]
+    },
+    "class_type": "ImageToMask",
+    "_meta": {
+      "title": "Convert Mask Image to Mask"
+    }
+  },
+  "104": {
+    "inputs": {
+      "grow_mask_by": 6,
+      "pixels": [
+        "101",
+        0
+      ],
+      "vae": [
+        "2",
+        4
+      ],
+      "mask": [
+        "103",
+        0
+      ]
+    },
+    "class_type": "VAEEncodeForInpaint",
+    "_meta": {
+      "title": "VAE Encode (for Inpainting)"
+    }
   }
 }

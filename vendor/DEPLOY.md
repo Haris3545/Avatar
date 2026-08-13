@@ -39,6 +39,25 @@ with two fixes:
    input was renamed `control_depth_strength` -> `control_image_strength`
    to match.
 
+4. A new optional `mask` input for inpainting. Even canny conditioning
+   turned out to only ever be a *nudge* -- testing `--control-image` at
+   low strength got the structure ignored, and at high strength destroyed
+   the style instead of fixing likeness, with no usable middle ground. No
+   ControlNet strength can *guarantee* a shape survives generation, only
+   bias toward it. A hard mask can: node 104 (`VAEEncodeForInpaint`, fed
+   by nodes 102/103 loading and converting the mask image) replaces node
+   51 (`VAEEncode`) as the sampler's latent source whenever `mask` is
+   given, restricting the sampler to only regenerate the masked region.
+   Its base pixels come from node 101 (the `control_image` branch, not
+   the real photo) -- the protected, unmasked region renders exactly
+   `control_image`'s pixels, so pair this with
+   `scripts/composite_line_art.py --scaffold`'s two outputs: the scaffold
+   image as `control_image`, its companion mask as `mask`. `image` still
+   supplies InstantID's facial identity embedding, unaffected. When
+   `mask` is omitted, `update_workflow` never rewires node 4's
+   `latent_image` away from its default (`51`), so old behavior is
+   unchanged.
+
 This needs to be built and pushed as your own Replicate model, since we
 can't modify fofr's hosted copy. Building it needs Docker, which isn't
 available either in this sandbox (network-blocked from Replicate's

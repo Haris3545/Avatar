@@ -12,15 +12,28 @@ structure conditioning: InstantID's identity embedding still comes from a
 real photo, while the edge structure can come from an already-simplified
 line-art composite instead of the photo's literal detail.
 
+--control-image alone is soft conditioning, though -- it only ever nudges
+generation toward the given structure, at any strength, and testing showed
+it can't guarantee specific shape/likeness survives (weak strength: ignored;
+strong strength: destroys the style instead of fixing likeness). Add --mask
+for a hard guarantee instead: generation is then restricted to only the
+masked region, so everything outside it renders exactly as --control-image,
+pixel for pixel. Use with composite_line_art.py's --scaffold mode, which
+produces a matched (scaffold image, mask) pair for exactly this.
+
 Usage:
     export REPLICATE_API_TOKEN=r8_...
     python3 scripts/generate_avatar_instantid.py path/to/photo.jpg --lora-weights https://.../trained_model.tar
-    # or, with a separate structure composite -- use composite_line_art.py's
+    # or, with soft structure conditioning -- use composite_line_art.py's
     # --structure mode (landmark-derived face geometry, not brightness-traced
     # detail) rather than its default full composite, which is too literal
     # for a ControlNet to condition on well:
     python3 scripts/composite_line_art.py path/to/photo.jpg structure.png --structure
     python3 scripts/generate_avatar_instantid.py path/to/photo.jpg --control-image structure.png --lora-weights https://.../trained_model.tar
+    # or, for a hard guarantee that the face/hair shape survives -- use
+    # --scaffold mode and pass its mask too:
+    python3 scripts/composite_line_art.py path/to/photo.jpg scaffold.png --scaffold
+    python3 scripts/generate_avatar_instantid.py path/to/photo.jpg --control-image scaffold.png --mask scaffold_mask.png --lora-weights https://.../trained_model.tar
 """
 import argparse
 import sys
@@ -140,7 +153,18 @@ def main():
         help="Optional separate image (e.g. scripts/composite_line_art.py output) used only "
         "for canny-edge structure conditioning. The main photo is still used for InstantID's "
         "facial identity embedding, which needs real photographic features and fails on a "
-        "pure line-art image. Requires the redeployed patched model with a second image input.",
+        "pure line-art image. Ignored when --mask is given.",
+    )
+    parser.add_argument(
+        "--mask",
+        help="Optional inpaint mask (white = editable, black = kept pixel-identical to "
+        "the scaffold). Pair with scripts/composite_line_art.py --scaffold's two outputs: "
+        "pass the scaffold image itself as --control-image and its companion _mask.png here. "
+        "Generation is restricted to the masked region only, guaranteeing the scaffold's "
+        "measured face/hair shape survives outside it -- unlike --control-image alone, which "
+        "only ever nudges the output toward a structure without guaranteeing any of it "
+        "survives. --control-image is required when --mask is given (it becomes the base "
+        "artwork for the protected, unmasked region).",
     )
     parser.add_argument("--out", default="avatar_out_iid.png", help="Where to save the result")
     parser.add_argument("--seed", type=int, default=42)
@@ -237,6 +261,9 @@ def main():
 
     predict_input = {"image": photo_url}
 
+    if args.mask and not args.control_image:
+        sys.exit("--mask requires --control-image (the scaffold it was generated from)")
+
     if args.control_image:
         control_path = Path(args.control_image)
         if not control_path.exists():
@@ -246,7 +273,16 @@ def main():
             uploaded_control = replicate.files.create(f)
         predict_input["control_image"] = uploaded_control.urls["get"]
 
-    print(f"Generating with {MODEL} (InstantID + depth ControlNet + LoRA)...")
+    if args.mask:
+        mask_path = Path(args.mask)
+        if not mask_path.exists():
+            sys.exit(f"Mask not found: {mask_path}")
+        print("Uploading mask...")
+        with open(mask_path, "rb") as f:
+            uploaded_mask = replicate.files.create(f)
+        predict_input["mask"] = uploaded_mask.urls["get"]
+
+    print(f"Generating with {MODEL} (InstantID + canny ControlNet + LoRA)...")
     prediction = replicate.predictions.create(
         version=MODEL,
         input={
