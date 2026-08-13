@@ -237,10 +237,14 @@ def main():
         "what the photo actually shows (eventually this should be an automated visual check, not manual)",
     )
     parser.add_argument(
-        "--no-whiten-background",
+        "--whiten-background",
         action="store_true",
-        help="skip the post-processing step that flood-fills the background to white "
-        "(the model has been unreliable at rendering white background via prompting alone)",
+        help="run the post-processing step that flood-fills the background to white. Off by "
+        "default: its grid-scan pass flood-fills any pixel close to the background tone "
+        "anywhere in the image, not just the background region -- once the model started "
+        "rendering real dot/stipple facial texture, that pass started whitening individual "
+        "dots that happened to be light enough, leaving a mottled speckle behind instead of "
+        "the clean texture the model actually generated.",
     )
     args = parser.parse_args()
 
@@ -322,11 +326,11 @@ def main():
 
     urllib.request.urlretrieve(result, args.out)
 
-    if not args.no_whiten_background:
+    if args.whiten_background:
         print("Whitening background...")
         whiten_background(Path(args.out))
-        print("Cropping to head and shoulders...")
-        crop_to_shoulders(Path(args.out))
+    print("Cropping to head and shoulders...")
+    crop_to_shoulders(Path(args.out))
 
     print(f"Saved to {args.out}")
 
