@@ -69,7 +69,13 @@ def main():
         input={
             "input_images": uploaded.urls["get"],
             "input_images_filetype": "zip",
-            "autocaption": False,  # use our own .txt captions instead of BLIP auto-captioning
+            # No "autocaption" field: cog-sdxl's actual schema has no such
+            # parameter (confirmed against its source) -- it was silently
+            # ignored on every past run. Captioning is decided purely by
+            # whether captions.csv exists in the zip (see
+            # prepare_lora_dataset.py); if it's missing, this falls back to
+            # BLIP auto-captioning with no warning, which is what was
+            # actually happening despite this line's old comment.
             "token_string": DEFAULT_PARAMS["token_string"],
             "max_train_steps": args.steps,
             "is_lora": True,

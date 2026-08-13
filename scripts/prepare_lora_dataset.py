@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 """Prepare the VCCP avatar set for SDXL LoRA training: composite onto white,
-resize/crop to square, caption, and zip for upload to Replicate."""
+resize/crop to square, caption, and zip for upload to Replicate.
+
+Captions go in a single captions.csv (columns: image_file, caption) inside
+the zip, not per-image .txt files: replicate/cog-sdxl's preprocess step only
+ever reads a caption from a CSV whose filename contains "caption" -- .txt
+files alongside each image are never read at all. Without the CSV, the
+trainer silently falls back to BLIP auto-captioning every image with a
+generic photo description, which is what was actually happening on every
+training run so far despite per-image .txt files being staged -- the
+carefully-written style caption below never once reached the LoRA."""
+import csv
 import zipfile
 from pathlib import Path
 
@@ -57,9 +67,13 @@ def prep_image(path: Path) -> Image.Image:
 
 
 def main():
+    if STAGING_DIR.exists():
+        for f in STAGING_DIR.iterdir():
+            f.unlink()
     STAGING_DIR.mkdir(parents=True, exist_ok=True)
     avatars = sorted(f for f in AVATAR_DIR.iterdir() if f.is_file() and f.name != ".gitkeep")
 
+    rows = []
     count = 0
     for f in avatars:
         try:
@@ -68,9 +82,15 @@ def main():
             print(f"skip {f.name}: {e}")
             continue
         stem = f"avatar_{count:03d}"
-        im.save(STAGING_DIR / f"{stem}.png")
-        (STAGING_DIR / f"{stem}.txt").write_text(CAPTION)
+        filename = f"{stem}.png"
+        im.save(STAGING_DIR / filename)
+        rows.append((filename, CAPTION))
         count += 1
+
+    with open(STAGING_DIR / "captions.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["image_file", "caption"])
+        writer.writerows(rows)
 
     with zipfile.ZipFile(OUT_ZIP, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in sorted(STAGING_DIR.iterdir()):
