@@ -363,7 +363,14 @@ def rembg_foreground(im: Image.Image, threshold: int = 127) -> np.ndarray:
 
     global _REMBG_SESSION
     if _REMBG_SESSION is None or _REMBG_SESSION.model_name != model_name:
-        _REMBG_SESSION = new_session(model_name)
+        # Force plain CPU execution. onnxruntime's macOS wheel also
+        # registers CoreMLExecutionProvider, and rembg's default provider
+        # list lets onnxruntime pick it -- which hands the model to
+        # ANECompilerService (Apple Neural Engine compilation) instead of
+        # just running it, sometimes taking many minutes for a single
+        # session and hanging in a way Ctrl+C can't interrupt (it's a
+        # separate OS daemon, not the python process).
+        _REMBG_SESSION = new_session(model_name, providers=["CPUExecutionProvider"])
 
     cutout = remove(im, session=_REMBG_SESSION).convert("RGBA")
     alpha = np.array(cutout)[:, :, 3]
