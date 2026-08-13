@@ -421,7 +421,7 @@
     "inputs": {
       "width": 1024,
       "height": 1024,
-      "interpolation": "nearest",
+      "interpolation": "lanczos",
       "keep_proportion": true,
       "condition": "always",
       "image": [
@@ -448,7 +448,7 @@
     "inputs": {
       "width": 1024,
       "height": 1024,
-      "interpolation": "nearest",
+      "interpolation": "lanczos",
       "keep_proportion": true,
       "condition": "always",
       "image": [

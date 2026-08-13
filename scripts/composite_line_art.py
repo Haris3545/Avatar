@@ -63,6 +63,28 @@ EYES = [
 # Category indices from MediaPipe's multiclass selfie segmenter
 BACKGROUND, HAIR, BODY_SKIN, FACE_SKIN, CLOTHES, OTHER = range(6)
 
+# Every stroke in the house style reads as "the same pen" -- one bold weight
+# for the outer silhouette/hair/jaw, one slightly lighter but still bold
+# weight for interior facial detail (eyebrows, nose, mouth, eyes, glasses).
+# Centralized here instead of a magic number at each call site so the two
+# bands stay in sync as the style gets tuned.
+OUTLINE_WIDTH = 7
+DETAIL_WIDTH = 5
+# The widths above were tuned by eye against a ~900px-tall photo. Source
+# headshots range from 200px thumbnails to 1300px photos, and a fixed pixel
+# width doesn't track that: on a small photo the face (and especially small
+# features like the nose/mouth curves) shrinks, but an unscaled stroke
+# doesn't, so it overwhelms the shape it's supposed to trace and reads as a
+# solid blob instead of a thin mark. Every width is scaled by this factor,
+# computed once per photo from its actual pixel dimensions.
+WIDTH_REFERENCE_PX = 900
+
+CLOTHES_FILL = (165, 165, 165)
+
+
+def stroke_scale(w: int, h: int) -> float:
+    return min(w, h) / WIDTH_REFERENCE_PX
+
 
 def disk(radius: int) -> np.ndarray:
     y, x = np.ogrid[-radius : radius + 1, -radius : radius + 1]
@@ -151,6 +173,14 @@ def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
         arc_bottom = cy + eye_width * 0.15
         stroke_w = max(int(eye_width * 0.09), 2)
         draw.arc([arc_left, arc_top, arc_right, arc_bottom], start=200, end=340, fill=(0, 0, 0), width=stroke_w)
+
+        # A short downward hook at the arc's outer corner reads as an
+        # eyelash flick, matching the reference avatars -- without it the
+        # eye is just a bare arc + dot, which looks slightly blank/flat.
+        outer_x = arc_left if p1[0] < p2[0] else arc_right
+        hook_end_x = outer_x - eye_width * 0.1 if p1[0] < p2[0] else outer_x + eye_width * 0.1
+        hook_y = cy - eye_width * 0.1
+        draw.line([(outer_x, hook_y), (hook_end_x, hook_y + eye_width * 0.12)], fill=(0, 0, 0), width=stroke_w)
 
     return np.array(img)
 
@@ -245,7 +275,7 @@ def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0004, samples: int
     return outer, holes
 
 
-def draw_smooth_strokes(canvas: Image.Image, contours, width: int = 4, supersample: int = 4) -> Image.Image:
+def draw_smooth_strokes(canvas: Image.Image, contours, width: int = 4, supersample: int = 6) -> Image.Image:
     """Render each closed point path as a single anti-aliased stroke with
     rounded joins, by drawing it oversized on a supersampled layer and
     downsampling with a high-quality filter -- PIL's native line drawing has
@@ -271,7 +301,100 @@ def draw_smooth_strokes(canvas: Image.Image, contours, width: int = 4, supersamp
     return canvas
 
 
-def draw_smooth_fills(canvas: Image.Image, contours, fill=(0, 0, 0), supersample: int = 4) -> Image.Image:
+def draw_tapered_stroke(canvas: Image.Image, points, mid_width: float, end_width: float, supersample: int = 6) -> Image.Image:
+    """Draw a single open stroke whose width tapers from end_width at each
+    tip up to mid_width at its center, like a brush stroke -- unlike
+    draw_smooth_strokes' constant width, this is for facial marks (an
+    eyebrow) that read as hand-drawn precisely because they're thicker in
+    the middle and thin out at the ends, not a uniform-diameter line.
+    Approximated as a chain of overlapping circles sized per-point along
+    the path, supersampled and downsampled for anti-aliasing like the
+    other stroke helpers here."""
+    if len(points) < 2:
+        return canvas
+
+    w, h = canvas.size
+    big = Image.new("RGBA", (w * supersample, h * supersample), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(big)
+    n = len(points)
+    for i, (px, py) in enumerate(points):
+        # Triangular taper: 0 at both ends, 1 at the midpoint.
+        t = i / (n - 1)
+        taper = 1 - abs(t - 0.5) * 2
+        radius = (end_width + (mid_width - end_width) * taper) / 2 * supersample
+        sx, sy = px * supersample, py * supersample
+        draw.ellipse([sx - radius, sy - radius, sx + radius, sy + radius], fill=(0, 0, 0, 255))
+        if i > 0:
+            px0, py0 = points[i - 1]
+            draw.line([(px0 * supersample, py0 * supersample), (sx, sy)], fill=(0, 0, 0, 255), width=max(int(radius * 1.6), 1))
+
+    big = big.resize((w, h), Image.LANCZOS)
+    canvas.paste(big, (0, 0), big)
+    return canvas
+
+
+def draw_pointed_stroke(canvas: Image.Image, points, base_width: float, fill=(0, 0, 0), supersample: int = 6) -> Image.Image:
+    """Draw an open stroke that starts at base_width and tapers linearly to
+    a fine point at its last point -- for a hair strand escaping the solid
+    fill (thick where it leaves the scalp, tapering to nothing at the tip),
+    unlike draw_tapered_stroke's symmetric thick-middle taper for eyebrows."""
+    if len(points) < 2:
+        return canvas
+
+    w, h = canvas.size
+    big = Image.new("RGBA", (w * supersample, h * supersample), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(big)
+    n = len(points)
+    for i, (px, py) in enumerate(points):
+        t = i / (n - 1)
+        radius = base_width / 2 * (1 - t) * supersample
+        sx, sy = px * supersample, py * supersample
+        draw.ellipse([sx - radius, sy - radius, sx + radius, sy + radius], fill=fill + (255,))
+        if i > 0:
+            px0, py0 = points[i - 1]
+            draw.line([(px0 * supersample, py0 * supersample), (sx, sy)], fill=fill + (255,), width=max(int(radius * 1.6), 1))
+
+    big = big.resize((w, h), Image.LANCZOS)
+    canvas.paste(big, (0, 0), big)
+    return canvas
+
+
+def draw_hair_strands(canvas: Image.Image, hair_outer_contours, detail_width: float = DETAIL_WIDTH, n_strands: int = 3) -> Image.Image:
+    """A small number of tapered strokes rising from the crown, drawn over
+    the solid hair fill -- matches the reference avatars' hair treatment
+    (a handful of individual strands escaping the flat silhouette, each
+    tapering to a point) instead of a featureless flat black mass with
+    nothing distinguishing it as hair."""
+    if not hair_outer_contours:
+        return canvas
+
+    contour = max(
+        hair_outer_contours,
+        key=lambda c: (c[:, 0].max() - c[:, 0].min()) * (c[:, 1].max() - c[:, 1].min()),
+    )
+    top_y = contour[:, 1].min()
+    bbox_h = contour[:, 1].max() - top_y
+    cx = contour[:, 0].mean()
+
+    near_top = contour[contour[:, 1] < top_y + bbox_h * 0.12]
+    if len(near_top) < n_strands:
+        return canvas
+    near_top = near_top[np.argsort(near_top[:, 0])]
+    idxs = np.linspace(0, len(near_top) - 1, n_strands).astype(int)
+
+    for idx in idxs:
+        bx, by = near_top[idx]
+        dx = 1.0 if bx >= cx else -1.0
+        length = bbox_h * 0.22
+        base = (bx, by)
+        mid = (bx + dx * length * 0.15, by - length * 0.5)
+        tip = (bx + dx * length * 0.35, by - length)
+        canvas = draw_pointed_stroke(canvas, [base, mid, tip], base_width=detail_width * 0.8)
+
+    return canvas
+
+
+def draw_smooth_fills(canvas: Image.Image, contours, fill=(0, 0, 0), supersample: int = 6) -> Image.Image:
     """Fill each smoothed contour as a solid polygon instead of pasting a
     mask's raw pixels, so the fill's own edge is fluid and anti-aliased
     too -- filling the raw mask directly would leave a pixel-jagged edge
@@ -393,6 +516,9 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     on top is where the two modes diverge."""
     gray = np.array(im.convert("L")).astype(np.float64)
     foreground = rembg_foreground(im)
+    scale = stroke_scale(*gray.shape[::-1])
+    outline_width = max(2, round(OUTLINE_WIDTH * scale))
+    detail_width = max(1, round(DETAIL_WIDTH * scale))
 
     # Round every shape's edges/corners to match the house style's thick,
     # rounded-cap strokes instead of raw pixel-jagged boundaries: a
@@ -420,15 +546,40 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     hair_clothes = ndimage.binary_opening(hair_clothes, structure=kernel)
     hair_clothes = hair_clothes & foreground
 
+    # Split the combined silhouette-derived mask back into hair (flat
+    # black) vs clothes (flat mid-grey) using the segmenter's own
+    # category labels -- the two tones the reference avatars actually use,
+    # instead of one undifferentiated black mass. A pixel inside
+    # hair_clothes that the segmenter didn't confidently call HAIR or
+    # CLOTHES (labelled OTHER, e.g. a low-contrast collar edge) is
+    # resolved to whichever of the two is spatially nearest, so it still
+    # gets a definite tone instead of a coin-flip per pixel.
+    hair_only = hair_clothes & (cat_mask == HAIR)
+    clothes_only = hair_clothes & (cat_mask == CLOTHES)
+    unclassified = hair_clothes & ~hair_only & ~clothes_only
+    if unclassified.any() and (hair_only.any() or clothes_only.any()):
+        labels = np.zeros(cat_mask.shape, dtype=np.uint8)
+        labels[hair_only] = 1
+        labels[clothes_only] = 2
+        known = labels > 0
+        _, (iy, ix) = ndimage.distance_transform_edt(~known, return_indices=True)
+        nearest = labels[iy, ix]
+        hair_only = hair_only | (unclassified & (nearest == 1))
+        clothes_only = clothes_only | (unclassified & (nearest == 2))
+    elif unclassified.any():
+        # No confidently-classified pixels at all to resolve against
+        # (rare) -- clothes is the safer default fill.
+        clothes_only = clothes_only | unclassified
+
     out_im = Image.fromarray(np.full(gray.shape + (3,), 255, dtype=np.uint8))
 
     # Fill and stroke hair/clothes (and the outer silhouette, for the parts
     # of the edge where skin is directly visible against the background,
     # e.g. jaw/cheek) from smoothed contours throughout, not a raw pixel
     # mask -- a single fluid line that still follows this specific photo's
-    # actual shape, instead of a stair-stepped edge. hair_clothes.min_area
-    # is kept low since hair and clothes are frequently two disconnected
-    # blobs, split by a visible neck, and both matter.
+    # actual shape, instead of a stair-stepped edge. min_area is kept low
+    # since hair and clothes are frequently two disconnected blobs, split
+    # by a visible neck, and both matter.
     #
     # include_holes=True matters here specifically: hair that frames both
     # sides of a visible face (rather than just sitting above it) makes a
@@ -442,62 +593,46 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     # boundary is least certain, since there's little real contrast to go
     # on -- unlike the jaw/face edge, this noise isn't real shape detail
     # worth preserving.
-    hair_clothes_outer, hair_clothes_holes = smooth_contours(
-        hair_clothes, min_area_frac=0.001, include_holes=True, smoothing=1.5
+    hair_outer, hair_holes = smooth_contours(hair_only, min_area_frac=0.001, include_holes=True, smoothing=1.5)
+    clothes_outer, clothes_holes = smooth_contours(
+        clothes_only, min_area_frac=0.001, include_holes=True, smoothing=1.5
     )
     silhouette_contours = smooth_contours(foreground, smoothing=1.5)
 
-    out_im = draw_smooth_fills(out_im, hair_clothes_outer)
-    out_im = draw_smooth_fills(out_im, hair_clothes_holes, fill=(255, 255, 255))
-    out_im = draw_smooth_strokes(out_im, silhouette_contours, width=6)
-    out_im = draw_smooth_strokes(out_im, hair_clothes_outer, width=6)
-    out_im = draw_smooth_strokes(out_im, hair_clothes_holes, width=6)
+    out_im = draw_smooth_fills(out_im, hair_outer)
+    out_im = draw_smooth_fills(out_im, hair_holes, fill=(255, 255, 255))
+    out_im = draw_smooth_fills(out_im, clothes_outer, fill=CLOTHES_FILL)
+    out_im = draw_smooth_fills(out_im, clothes_holes, fill=(255, 255, 255))
+    out_im = draw_smooth_strokes(out_im, silhouette_contours, width=outline_width)
+    out_im = draw_smooth_strokes(out_im, hair_outer, width=outline_width)
+    out_im = draw_smooth_strokes(out_im, hair_holes, width=outline_width)
+    out_im = draw_smooth_strokes(out_im, clothes_outer, width=outline_width)
+    out_im = draw_smooth_strokes(out_im, clothes_holes, width=outline_width)
+    out_im = draw_hair_strands(out_im, hair_outer, detail_width=detail_width)
 
     return np.array(out_im), foreground, gray, hair_clothes
 
 
-def composite_line_art(photo_path: Path, out_path: Path):
-    print("Segmenting photo...")
-    im = Image.open(photo_path).convert("RGB")
-    cat_mask = segment(im)
-    print("Detecting face landmarks...")
-    landmarks = get_face_landmarks(im)
-    out, foreground, gray, hair_clothes = _base_layers(im, cat_mask, landmarks)
-
-    skin_mask = (cat_mask == FACE_SKIN) | (cat_mask == BODY_SKIN)
+def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.ndarray, foreground: np.ndarray, landmarks, detail_width: float = DETAIL_WIDTH, scale: float = 1.0) -> Image.Image:
+    """Threshold real dark detail within the skin -- currently just
+    glasses, drawn as a single continuous outline -- and drop everything
+    else (beard shadow, stubble, skin texture) instead of painting it as a
+    mid-grey stipple. A flat reference avatar has no halftone texture and
+    only ever uses a couple of flat shades, so tracing brightness noise as
+    "detail" just reads as washed out. Eyebrows/nose/mouth are instead
+    drawn separately as clean landmark lines, not thresholded from the
+    photo."""
+    out = np.array(out_im)
     fg_vals = gray[foreground]
     lo, hi = np.percentile(fg_vals, [2, 98]) if fg_vals.size else (0, 255)
     gray_norm = np.clip((gray - lo) / max(hi - lo, 1) * 255, 0, 255)
-    # Erode away a margin near the skin's own *outer* edge before looking
-    # for dark detail -- directional lighting casts a real shadow there
-    # (falling off toward the side of the face away from the light) that
-    # a brightness threshold can't tell apart from an actual feature.
-    # Real features (glasses, pupils) sit more centrally on the face, so
-    # they survive the erosion; a shadow gradient hugging the boundary
-    # doesn't.
-    #
-    # Erode a hole-filled copy, not skin_mask directly: skin_mask already
-    # has internal gaps wherever something (like glasses) covers the skin,
-    # and eroding it directly pulls back from those internal edges too --
-    # eating exactly the glasses detail this is supposed to leave alone.
-    filled_skin = ndimage.binary_fill_holes(skin_mask)
-    interior_skin = ndimage.binary_erosion(filled_skin, structure=disk(18)) & skin_mask
-    dark_mask = interior_skin & (gray_norm < 120)
 
-    # Small dark blobs (beard shadow, stubble, skin texture) are dropped
-    # entirely instead of being painted as a mid-grey stipple -- a flat
-    # reference avatar has no halftone texture and only ever uses a couple
-    # of flat shades, so tracing brightness noise as "detail" just reads as
-    # washed out. Eyebrows and the nose are instead drawn as clean landmark
-    # lines below, not thresholded from the photo.
-    #
-    # Glasses are the exception: a thin frame is made of many small,
-    # individually-tiny dark blobs (reflections and pixel gaps break it
-    # into disconnected pieces), so the same size threshold that correctly
-    # drops stubble would also drop the glasses entirely. Keep all blob
-    # sizes within a padded box around the eyes/eyebrows -- where a small
-    # dark blob is glasses detail, not skin texture -- and only apply the
-    # size threshold outside it.
+    # A thin glasses frame is made of many small, individually-tiny dark
+    # blobs (reflections and pixel gaps break it into disconnected
+    # pieces), so it's only looked for within a padded box around the
+    # eyes/eyebrows -- restricting the search region is what lets "keep
+    # every blob size here" not also mean "keep stray dark pixels
+    # anywhere on the face."
     if landmarks is not None:
         from mediapipe.tasks.python import vision
 
@@ -517,26 +652,61 @@ def composite_line_art(photo_path: Path, out_path: Path):
         pad_x, pad_y = (max(xs) - min(xs)) * 0.35, (max(ys) - min(ys)) * 1.4
         gx0, gx1 = min(xs) - pad_x, max(xs) + pad_x
         gy0, gy1 = min(ys) - pad_y, max(ys) + pad_y
-        glasses_region = np.zeros_like(dark_mask)
+        glasses_region = np.zeros(gray_norm.shape, dtype=bool)
         glasses_region[int(gy0) : int(gy1), int(gx0) : int(gx1)] = True
     else:
-        glasses_region = np.zeros_like(dark_mask)
-
-    fg_area = foreground.sum()
-    big_blob_thresh = fg_area * 0.015
-    labeled, num = ndimage.label(dark_mask)
-    for i in range(1, num + 1):
-        blob = labeled == i
-        if blob.sum() >= big_blob_thresh or (blob & glasses_region).any():
-            out[blob] = (0, 0, 0)
+        glasses_region = np.zeros(gray_norm.shape, dtype=bool)
 
     out_im = Image.fromarray(out)
-    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=5)
+
+    # Not dark_mask (which requires skin_mask to be true at that pixel):
+    # the glasses frame itself is exactly what the segmenter does *not*
+    # classify as skin, so restricting to skin_mask was excluding almost
+    # the entire frame and leaving only stray edge/reflection pixels that
+    # happened to fall on adjacent skin -- which is what the old "many tiny
+    # disconnected blobs" fragmentation actually was. Within the padded
+    # eye/eyebrow box that already constrains the search spatially, just
+    # threshold brightness directly against the real photo.
+    #
+    # Previously filled every surviving small dark blob solid black
+    # individually, which left visible gaps wherever a reflection or
+    # pixel-level noise broke the frame into disconnected pieces. A
+    # morphological closing first bridges those small gaps into one
+    # connected shape per lens/frame, then it's drawn as a single smoothed
+    # *outline* (not a filled blob) -- matching the reference avatars'
+    # hollow rounded-rectangle frames instead of a solid dark mass, and
+    # guaranteeing the drawn line has no breaks regardless of how
+    # fragmented the raw pixels were.
+    glasses_raw = glasses_region & foreground & (gray_norm < 120)
+    if glasses_raw.any():
+        glasses_closed = ndimage.binary_closing(glasses_raw, structure=disk(max(2, round(5 * scale))))
+        glasses_outer, glasses_holes = smooth_contours(
+            glasses_closed, min_area_frac=0.0006, include_holes=True, smoothing=0.4
+        )
+        out_im = draw_smooth_strokes(out_im, glasses_outer, width=detail_width)
+        out_im = draw_smooth_strokes(out_im, glasses_holes, width=detail_width)
+
+    return out_im
+
+
+def composite_line_art(photo_path: Path, out_path: Path):
+    print("Segmenting photo...")
+    im = Image.open(photo_path).convert("RGB")
+    cat_mask = segment(im)
+    print("Detecting face landmarks...")
+    landmarks = get_face_landmarks(im)
+    out, foreground, gray, hair_clothes = _base_layers(im, cat_mask, landmarks)
+    h, w = gray.shape
+    scale = stroke_scale(w, h)
+    detail_width = max(1, round(DETAIL_WIDTH * scale))
+
+    out_im = Image.fromarray(out)
+    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=detail_width)
+    out_im = draw_dark_face_detail(out_im, cat_mask, gray, foreground, landmarks, detail_width=detail_width, scale=scale)
     out = np.array(out_im)
 
     if landmarks is not None:
-        h, w = gray.shape
-        out = draw_face_structure_lines(out, landmarks, w, h)
+        out = draw_face_structure_lines(out, landmarks, w, h, detail_width=detail_width)
         out = draw_dot_eyes(out, landmarks, w, h)
     else:
         print("No face detected, skipping face structure lines and dot-eye replacement")
@@ -554,11 +724,17 @@ def face_skin_contours(cat_mask: np.ndarray):
     gradient-snapping along a short search line, which has no such
     understanding and can grab a stronger but wrong nearby edge (glasses,
     a collar seam, a shirt pattern) instead of the real, sometimes subtle,
-    jaw shadow."""
-    return smooth_contours(cat_mask == FACE_SKIN, min_area_frac=0.01)
+    jaw shadow.
+
+    smoothing=0.5 (up from the function default of 0.15): the segmenter's
+    pixel-to-pixel boundary along the jaw has real per-pixel jitter that a
+    light smoothing pass leaves visible as a wobble rather than a clean
+    curve -- this is the same fix already applied to the hair/clothes/
+    silhouette contours below, just also needed here."""
+    return smooth_contours(cat_mask == FACE_SKIN, min_area_frac=0.01, smoothing=0.5)
 
 
-def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
+def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail_width: float = DETAIL_WIDTH) -> np.ndarray:
     """Draw only geometric likeness cues -- face/jaw shape, eyebrow shape and
     position, nose bridge and width -- as thin lines from real landmark
     positions, instead of tracing brightness/texture from the photo. This is
@@ -573,18 +749,37 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int) -> np.
     connections = vision.FaceLandmarksConnections
     img = Image.fromarray(out)
     draw = ImageDraw.Draw(img)
+    line_width = max(1, detail_width - 1)
 
-    def draw_conns(conns, width):
-        for conn in conns:
-            p1, p2 = landmarks[conn.start], landmarks[conn.end]
-            draw.line(
-                [(p1.x * w, p1.y * h), (p2.x * w, p2.y * h)],
-                fill=(0, 0, 0),
-                width=width,
-            )
+    def ordered_points(conns):
+        """FACE_LANDMARKS_*_EYEBROW is a set of disjoint segment pairs, not a
+        pre-ordered walk -- reconstruct the walk the same way
+        _ordered_face_oval_indices() does, so a path can be tapered
+        end-to-middle-to-end instead of drawn as unordered straight
+        segments."""
+        adjacency = {}
+        for c in conns:
+            adjacency.setdefault(c.start, []).append(c.end)
+            adjacency.setdefault(c.end, []).append(c.start)
+        start = next(idx for idx, nbrs in adjacency.items() if len(nbrs) == 1)
+        order = [start]
+        prev, cur = None, start
+        while True:
+            neighbors = [n for n in adjacency[cur] if n != prev]
+            if not neighbors:
+                break
+            nxt = neighbors[0]
+            order.append(nxt)
+            prev, cur = cur, nxt
+        return [(landmarks[i].x * w, landmarks[i].y * h) for i in order]
 
-    draw_conns(connections.FACE_LANDMARKS_LEFT_EYEBROW, width=3)
-    draw_conns(connections.FACE_LANDMARKS_RIGHT_EYEBROW, width=3)
+    # Tapered (thick middle, thin ends) instead of a constant-width line --
+    # matches the reference avatars' brush-stroke eyebrows rather than a
+    # uniform-diameter bar.
+    for conns in (connections.FACE_LANDMARKS_LEFT_EYEBROW, connections.FACE_LANDMARKS_RIGHT_EYEBROW):
+        pts = ordered_points(conns)
+        img = draw_tapered_stroke(img, pts, mid_width=detail_width + 1, end_width=max(1, detail_width - 2))
+    draw = ImageDraw.Draw(img)
 
     # Just the line under the nose (nostril hook to nostril hook), not the
     # full nose mesh (bridge + nostril wings + tip outline) -- matches the
@@ -599,8 +794,30 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int) -> np.
     nose_bottom_idx = [49, 129, 98, 2, 327, 358, 279]
     pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in nose_bottom_idx])
     tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
-    xs, ys = splev(np.linspace(0, 1, 40), tck)
-    draw.line(list(zip(xs, ys)), fill=(0, 0, 0), width=3, joint="curve")
+    # Reference avatars mark the nose with a small comma-like mark near the
+    # tip, not a line spanning the full nostril-to-nostril width -- sample
+    # only the middle portion of the same real spline (rather than a
+    # separately-guessed shape) to shrink it down to that size while
+    # keeping its actual up-down-up-down curvature.
+    xs, ys = splev(np.linspace(0.32, 0.68, 24), tck)
+    draw.line(list(zip(xs, ys)), fill=(0, 0, 0), width=line_width, joint="curve")
+
+    # Mouth: a simple two-line smile, not the full lip outline -- an upper
+    # curve through the real outer-lip landmarks (mouth corners to cupid's
+    # bow), and a short second line beneath it approximating the lower lip,
+    # offset from the upper curve's own midsection rather than a second set
+    # of guessed landmark indices, so it can't drift out of proportion to
+    # the mouth width/height this specific face actually measured.
+    upper_lip_idx = [61, 40, 37, 0, 267, 270, 291]
+    upts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in upper_lip_idx])
+    utck, _ = splprep([upts[:, 0], upts[:, 1]], s=0, k=3)
+    uxs, uys = splev(np.linspace(0, 1, 40), utck)
+    draw.line(list(zip(uxs, uys)), fill=(0, 0, 0), width=line_width, joint="curve")
+
+    mouth_h = abs(landmarks[17].y - landmarks[0].y) * h
+    lower_xs, lower_ys = splev(np.linspace(0.3, 0.7, 20), utck)
+    lower_ys = np.array(lower_ys) + mouth_h * 0.55
+    draw.line(list(zip(lower_xs, lower_ys)), fill=(0, 0, 0), width=line_width, joint="curve")
 
     return np.array(img)
 
@@ -617,14 +834,15 @@ def structure_composite(photo_path: Path, out_path: Path):
     print("Detecting face landmarks for face structure...")
     landmarks = get_face_landmarks(im)
     out, foreground, gray, hair_clothes = _base_layers(im, cat_mask, landmarks)
+    h, w = gray.shape
+    detail_width = max(1, round(DETAIL_WIDTH * stroke_scale(w, h)))
 
     out_im = Image.fromarray(out)
-    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=5)
+    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=detail_width)
     out = np.array(out_im)
 
     if landmarks is not None:
-        h, w = gray.shape
-        out = draw_face_structure_lines(out, landmarks, w, h)
+        out = draw_face_structure_lines(out, landmarks, w, h, detail_width=detail_width)
         out = draw_dot_eyes(out, landmarks, w, h)
     else:
         print("No face detected, skipping face structure lines")
@@ -653,15 +871,37 @@ def scaffold_composite(photo_path: Path, out_path: Path, mask_path: Path):
     print("Detecting face landmarks for jaw line and inpaint mask...")
     landmarks = get_face_landmarks(im)
     out, foreground, gray, hair_clothes = _base_layers(im, cat_mask, landmarks)
+    h, w = gray.shape
+    scale = stroke_scale(w, h)
+    detail_width = max(1, round(DETAIL_WIDTH * scale))
 
     out_im = Image.fromarray(out)
-    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=5)
-    out = np.array(out_im)
+    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=detail_width)
+    out_im = draw_dark_face_detail(out_im, cat_mask, gray, foreground, landmarks, detail_width=detail_width, scale=scale)
 
-    # The editable region is simply the segmenter's own FACE_SKIN area --
-    # already exactly the visible skin, not hair-covered forehead or
-    # anything outside the just-drawn outline.
-    mask = cat_mask == FACE_SKIN
+    # Eyebrows, nose, mouth, and eyes are drawn classically here too
+    # (previously only composite_line_art()/structure_composite() did this)
+    # and locked into the protected/unmasked region below -- these are
+    # exactly the features a landmark computation gets right reliably, so
+    # there's no reason to leave them for the generation model to
+    # freehand from a blank masked hole with only a text prompt to go on,
+    # which is what was actually producing the stubble/gap artifacts.
+    if landmarks is not None:
+        out = draw_face_structure_lines(np.array(out_im), landmarks, w, h, detail_width=detail_width)
+        out = draw_dot_eyes(out, landmarks, w, h)
+    else:
+        print("No face detected, skipping face structure lines and dot-eye replacement")
+        out = np.array(out_im)
+
+    # The editable region is the segmenter's own FACE_SKIN area, minus a
+    # dilated margin around every classically-drawn feature above -- the
+    # model's job shrinks from "draw an entire face" down to just skin
+    # polish in the gaps between those features, instead of being able to
+    # redraw (and potentially break) eyebrows/nose/mouth/eyes/glasses that
+    # are already correct.
+    locked = np.any(out != 255, axis=-1) & (cat_mask == FACE_SKIN)
+    locked = ndimage.binary_dilation(locked, structure=disk(6))
+    mask = (cat_mask == FACE_SKIN) & ~locked
 
     Image.fromarray(out).save(out_path)
     Image.fromarray((mask * 255).astype(np.uint8)).save(mask_path)
