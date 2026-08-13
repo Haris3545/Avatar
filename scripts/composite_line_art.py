@@ -87,7 +87,14 @@ def segment(im: Image.Image) -> np.ndarray:
     with vision.ImageSegmenter.create_from_options(options) as segmenter:
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.array(im.convert("RGB")))
         result = segmenter.segment(mp_image)
-        return np.squeeze(result.category_mask.numpy_view())
+        # .numpy_view() is a non-owning view into the segmenter's internal
+        # C++ buffer, only valid while `result` (and the `with` block) are
+        # alive. Reading it immediately after usually still works because
+        # the freed memory hasn't been reused yet, but any heavy allocation
+        # afterward (e.g. rembg's model) can silently overwrite it, making
+        # later reads of the returned array return garbage. .copy() forces
+        # an owned array that survives independently.
+        return np.squeeze(result.category_mask.numpy_view()).copy()
 
 
 def get_face_model_path() -> Path:
