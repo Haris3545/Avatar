@@ -335,18 +335,32 @@ def reveal_ears(hair_clothes: np.ndarray, cat_mask: np.ndarray, im: Image.Image,
     return corrected
 
 
-def rembg_foreground(im: Image.Image, threshold: int = 127) -> np.ndarray:
-    """A dedicated matting model (rembg/U^2-Net) for just the foreground
-    vs. background question, instead of MediaPipe's multiclass segmenter --
-    which has to simultaneously classify hair/skin/clothes/etc, and (unlike
-    a model built for this one job) runs at a fixed, fairly low 256x256
-    internal resolution regardless of the photo's real size. Compared
-    directly against MediaPipe's own foreground mask, rembg's edge is
-    visibly cleaner (no small speckle dropouts near glasses/ear) with no
-    extra smoothing needed to get there."""
-    from rembg import remove
+_REMBG_SESSION = None
 
-    cutout = remove(im).convert("RGBA")
+
+def rembg_foreground(im: Image.Image, threshold: int = 127) -> np.ndarray:
+    """A dedicated matting model for just the foreground vs. background
+    question, instead of MediaPipe's multiclass segmenter -- which has to
+    simultaneously classify hair/skin/clothes/etc, and (unlike a model
+    built for this one job) runs at a fixed, fairly low 256x256 internal
+    resolution regardless of the photo's real size.
+
+    Uses rembg's birefnet-portrait model specifically, not its faster
+    u2net default: on a photo with dark hair against a dark, textured
+    background (a chalkboard), u2net's foreground mask included a chunk
+    of the shadowed wall next to the head as if it were hair, extending
+    the silhouette well past the real hairline -- birefnet-portrait (a
+    heavier transformer model, trained specifically on portraits) doesn't
+    make that mistake on the same photo. It's meaningfully slower
+    (~30-60s vs ~1-2s on CPU), but this runs once per photo, not
+    real-time, so the accuracy is worth the wait."""
+    from rembg import new_session, remove
+
+    global _REMBG_SESSION
+    if _REMBG_SESSION is None:
+        _REMBG_SESSION = new_session("birefnet-portrait")
+
+    cutout = remove(im, session=_REMBG_SESSION).convert("RGBA")
     alpha = np.array(cutout)[:, :, 3]
     return alpha > threshold
 
