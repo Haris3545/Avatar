@@ -69,9 +69,10 @@ def main():
         "--prompt",
         default="TOK style, monochrome black and white line art portrait illustration, "
         "pure solid white background, no background detail, "
-        "flat solid black fills, minimal occasional cross-hatching only, mostly flat shapes, "
+        "extremely minimal linework, as few thick rounded strokes as possible, flat solid black fills, mostly flat shapes, "
         "simple graphic dot eyes, simplified cartoon facial features, no fine detail, "
-        "no gradients, halftone dot texture used sparingly only where the actual photo shows it, "
+        "no shading device of any kind -- no halftone, no cross-hatching, no stipple, no gradient, "
+        "at most three or four flat tones total in the entire image, never more, "
         "closed mouth gentle smile, "
         "graphic vector illustration, no photorealism, centered head and shoulders portrait crop",
     )

@@ -206,10 +206,11 @@ def main():
         "--prompt",
         default="TOK style, monochrome black and white line art portrait illustration, "
         "solid pure white background (like blank white paper), plain white background, no background detail, "
-        "flat solid black fills, minimal occasional cross-hatching only, mostly flat shapes, "
-        "simple graphic dot eyes, simplified cartoon facial features, no fine detail, "
-        "no gradients, halftone dot texture as a stylistic shading device on areas like beard, "
-        "jaw shadow, or hair volume -- matching the reference avatar art style, not the photo's texture, "
+        "extremely minimal linework, as few thick rounded strokes as possible, flat solid black fills, "
+        "mostly flat shapes, simple graphic dot eyes, simplified cartoon facial features, no fine detail, "
+        "no shading device of any kind -- no halftone, no cross-hatching, no stipple, no gradient, "
+        "anywhere including beard, jaw, or hair, only flat solid fills or bare white, "
+        "at most three or four flat tones total in the entire image, never more, never a texture standing in for a tone, "
         "clothing rendered as one flat solid black shape with no pattern, warm natural smile, "
         "graphic vector illustration, no photorealism, centered head and shoulders portrait crop",
     )

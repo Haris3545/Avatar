@@ -29,8 +29,9 @@ def main():
     parser.add_argument(
         "--prompt",
         default="TOK style, monochrome black and white line art portrait illustration, "
-        "pure black ink outline on solid white background, thin clean outline, "
-        "flat two-tone shading only, no gradients, halftone dot texture on beard and shadow areas, "
+        "pure black ink outline on solid white background, thick clean rounded outline, "
+        "flat two or three tone shading only, no gradients, no halftone dot texture, no cross-hatching, "
+        "no stipple, no shading device of any kind on beard, jaw, or hair, "
         "simplified facial features, graphic vector illustration, no photorealism",
     )
     args = parser.parse_args()
