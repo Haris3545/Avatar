@@ -148,6 +148,92 @@ def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
     return np.array(img)
 
 
+def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0015, samples: int = 400, min_area_frac: float = 0.002):
+    """Fit a smooth closed curve through each significant contour of a mask
+    (hair and clothes are frequently two disconnected blobs, split by a
+    visible neck), instead of using the mask's raw pixel-jagged boundary
+    directly. cv2.approxPolyDP strips pixel-level jitter while keeping this
+    specific mask's actual shape (not a generic template), then a periodic
+    spline through those points gives a fluid curve rather than a polygon
+    of straight segments."""
+    import cv2
+    from scipy.interpolate import splev, splprep
+
+    mask_u8 = mask.astype(np.uint8) * 255
+    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return []
+    min_area = mask.size * min_area_frac
+
+    smoothed = []
+    for contour in contours:
+        contour = contour.astype(np.float32)
+        if cv2.contourArea(contour) < min_area or contour.shape[0] < 8:
+            continue
+
+        peri = cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon_frac * peri, True).squeeze(1)
+        if approx.shape[0] < 4:
+            continue
+
+        x, y = approx[:, 0].astype(np.float64), approx[:, 1].astype(np.float64)
+        try:
+            tck, _ = splprep([x, y], s=len(x) * 2, per=True)
+            u = np.linspace(0, 1, samples)
+            xs, ys = splev(u, tck)
+            smoothed.append(np.stack([xs, ys], axis=1))
+        except Exception:
+            smoothed.append(approx)
+
+    return smoothed
+
+
+def draw_smooth_strokes(canvas: Image.Image, contours, width: int = 4, supersample: int = 4) -> Image.Image:
+    """Render each closed point path as a single anti-aliased stroke with
+    rounded joins, by drawing it oversized on a supersampled layer and
+    downsampling with a high-quality filter -- PIL's native line drawing has
+    no anti-aliasing, which is exactly what makes a raw-mask outline look
+    low-resolution and stair-stepped instead of a fluid drawn line."""
+    if not contours:
+        return canvas
+
+    w, h = canvas.size
+    big = Image.new("RGBA", (w * supersample, h * supersample), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(big)
+    stroke_w = width * supersample
+    r = stroke_w / 2
+    for points in contours:
+        scaled = [(px * supersample, py * supersample) for px, py in points]
+        closed = scaled + [scaled[0]]
+        draw.line(closed, fill=(0, 0, 0, 255), width=stroke_w, joint="curve")
+        for px, py in scaled:
+            draw.ellipse([px - r, py - r, px + r, py + r], fill=(0, 0, 0, 255))
+
+    big = big.resize((w, h), Image.LANCZOS)
+    canvas.paste(big, (0, 0), big)
+    return canvas
+
+
+def draw_smooth_fills(canvas: Image.Image, contours, fill=(0, 0, 0), supersample: int = 4) -> Image.Image:
+    """Fill each smoothed contour as a solid polygon instead of pasting a
+    mask's raw pixels, so the fill's own edge is fluid and anti-aliased
+    too -- filling the raw mask directly would leave a pixel-jagged edge
+    even with a smooth stroke drawn on top of it."""
+    if not contours:
+        return canvas
+
+    w, h = canvas.size
+    big = Image.new("RGBA", (w * supersample, h * supersample), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(big)
+    for points in contours:
+        scaled = [(px * supersample, py * supersample) for px, py in points]
+        draw.polygon(scaled, fill=fill + (255,))
+
+    big = big.resize((w, h), Image.LANCZOS)
+    canvas.paste(big, (0, 0), big)
+    return canvas
+
+
 def _base_layers(im: Image.Image, cat_mask: np.ndarray):
     """Shared groundwork for both composite modes: a white canvas with flat
     black hair/clothes fills and a thick rounded outer silhouette outline,
@@ -166,19 +252,27 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray):
     # rounding is actually circular, not the diamond shape a default
     # cross-shaped structure would give.
     hair_clothes = (cat_mask == HAIR) | (cat_mask == CLOTHES) | (cat_mask == OTHER)
-    kernel = disk(6)
+    kernel = disk(4)
     hair_clothes = ndimage.binary_closing(hair_clothes, structure=kernel)
     hair_clothes = ndimage.binary_opening(hair_clothes, structure=kernel)
 
-    out = np.full(gray.shape + (3,), 255, dtype=np.uint8)  # white canvas
-    out[hair_clothes] = (0, 0, 0)
+    out_im = Image.fromarray(np.full(gray.shape + (3,), 255, dtype=np.uint8))
 
-    # Outer silhouette outline, thick with rounded caps/corners
-    eroded = ndimage.binary_erosion(foreground, structure=disk(7))
-    outline = foreground & ~eroded
-    out[outline] = (0, 0, 0)
+    # Fill and stroke hair/clothes (and the outer silhouette, for the parts
+    # of the edge where skin is directly visible against the background,
+    # e.g. jaw/cheek) from smoothed contours throughout, not a raw pixel
+    # mask -- a single fluid line that still follows this specific photo's
+    # actual shape, instead of a stair-stepped edge. hair_clothes.min_area
+    # is kept low since hair and clothes are frequently two disconnected
+    # blobs, split by a visible neck, and both matter.
+    hair_clothes_contours = smooth_contours(hair_clothes, min_area_frac=0.001)
+    silhouette_contours = smooth_contours(foreground)
 
-    return out, foreground, gray
+    out_im = draw_smooth_fills(out_im, hair_clothes_contours)
+    out_im = draw_smooth_strokes(out_im, silhouette_contours, width=4)
+    out_im = draw_smooth_strokes(out_im, hair_clothes_contours, width=4)
+
+    return np.array(out_im), foreground, gray
 
 
 def composite_line_art(photo_path: Path, out_path: Path):
