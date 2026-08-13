@@ -188,12 +188,12 @@ def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radi
     contrast), keep the landmark position rather than inventing an edge
     that isn't there.
 
-    Snapped points get a light 3-point smoothing pass to simplify the shape
-    (remove single-point jaggedness) without erasing what it actually
-    measured. Where two neighboring points still end up unnaturally far
-    apart after that -- one snapped to a real edge, its neighbor didn't --
-    forcing a line between them would draw a connection that isn't really
-    there, so the sequence is split at that gap instead of joined.
+    Simplification is left to the caller's drawing step (a light spline
+    smoothing pass), not done here, so the actual measured positions stay
+    intact for the break check below: where two neighboring points end up
+    unnaturally far apart -- one snapped to a real edge, its neighbor
+    didn't -- forcing a line between them would draw a connection that
+    isn't really there, so the sequence is split at that gap instead.
 
     Returns a list of ordered (not closed) point-sequence segments, since
     the real jaw evidence may not form one continuous arc. Empty list if
@@ -246,11 +246,6 @@ def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radi
             continue  # no reliable edge here -- keep the landmark position
         refined[i] = (sample_pts[best] + sample_pts[best + 1]) / 2
 
-    # Simplify: smooth out single-point jaggedness from independent
-    # per-point snapping, rather than drawing every measurement wiggle.
-    if m >= 3:
-        refined[1:-1] = (refined[:-2] + refined[1:-1] + refined[2:]) / 3
-
     # Split wherever the connection between neighbors is unnaturally long
     # relative to the landmarks' own spacing, instead of drawing a straight
     # jump across a gap that isn't really part of the same measured edge.
@@ -283,7 +278,7 @@ def draw_open_smooth_stroke(canvas: Image.Image, points, width: int = 3, supersa
 
     x, y = points[:, 0], points[:, 1]
     try:
-        tck, _ = splprep([x, y], s=len(x) * 1.0, per=False)
+        tck, _ = splprep([x, y], s=len(x) * 0.5, per=False)
         u = np.linspace(0, 1, max(len(x) * 4, 50))
         xs, ys = splev(u, tck)
         smoothed = np.stack([xs, ys], axis=1)
