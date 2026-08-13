@@ -15,8 +15,12 @@ line-art composite instead of the photo's literal detail.
 Usage:
     export REPLICATE_API_TOKEN=r8_...
     python3 scripts/generate_avatar_instantid.py path/to/photo.jpg --lora-weights https://.../trained_model.tar
-    # or, with a separate structure composite:
-    python3 scripts/generate_avatar_instantid.py path/to/photo.jpg --control-image composite.png --lora-weights https://.../trained_model.tar
+    # or, with a separate structure composite -- use composite_line_art.py's
+    # --structure mode (landmark-derived face geometry, not brightness-traced
+    # detail) rather than its default full composite, which is too literal
+    # for a ControlNet to condition on well:
+    python3 scripts/composite_line_art.py path/to/photo.jpg structure.png --structure
+    python3 scripts/generate_avatar_instantid.py path/to/photo.jpg --control-image structure.png --lora-weights https://.../trained_model.tar
 """
 import argparse
 import sys
@@ -70,12 +74,18 @@ def whiten_background(path: Path, thresh: int = 45, grid_step: int = 12) -> Imag
     return im
 
 
-def crop_to_shoulders(path: Path, keep_fraction: float = 0.72) -> None:
+def crop_to_shoulders(path: Path, margin_fraction: float = 0.12) -> None:
     """Crop to the subject's actual bounding box (against a white
-    background) and cut off the bottom portion, since the model has been
-    consistently framing too much torso and too much empty headroom above
-    the head instead of a tight head-and-shoulders crop."""
+    background), then cut off just below the shoulders -- a proper headshot
+    crop, not too much torso and not cutting into the neck. A fixed height
+    fraction broke across different photo framings, since how far down the
+    shoulders fall relative to the head varies photo to photo. Instead, use
+    the subject's own silhouette width profile: find the neck (the
+    narrowest point below the head) and the shoulder line (where the
+    silhouette re-widens to its full body width below that), then crop a
+    small margin below the shoulder line."""
     from PIL import ImageChops
+    import numpy as np
 
     im = Image.open(path).convert("RGB")
     bg = Image.new("RGB", im.size, (255, 255, 255))
@@ -84,7 +94,36 @@ def crop_to_shoulders(path: Path, keep_fraction: float = 0.72) -> None:
         return
     left, top, right, bottom = bbox
     content_height = bottom - top
-    new_bottom = min(top + int(content_height * keep_fraction), im.height)
+    fallback_bottom = min(top + int(content_height * 0.72), im.height)
+
+    arr = np.array(im)
+    non_white = np.any(arr < 250, axis=2)
+    col_idx = np.arange(arr.shape[1])
+    widths = np.zeros(arr.shape[0], dtype=int)
+    for y in range(top, bottom + 1):
+        xs = col_idx[non_white[y]]
+        if xs.size:
+            widths[y] = xs[-1] - xs[0]
+
+    # Only look for the neck within a plausible zone below the head's
+    # widest point, so this doesn't get confused by torso/arm narrowing
+    # further down the image.
+    search_start = top + int(content_height * 0.35)
+    search_end = min(top + int(content_height * 0.85), bottom)
+
+    new_bottom = fallback_bottom
+    if search_start < search_end:
+        neck_y = search_start + int(np.argmin(widths[search_start:search_end]))
+        below = widths[neck_y : bottom + 1]
+        shoulder_width = below.max() if below.size else 0
+        if shoulder_width > widths[neck_y]:
+            threshold = widths[neck_y] + (shoulder_width - widths[neck_y]) * 0.85
+            flare_offset = int(np.argmax(below >= threshold))
+            shoulder_y = neck_y + flare_offset
+            new_bottom = min(
+                shoulder_y + int(content_height * margin_fraction), im.height
+            )
+
     im.crop((left, top, right, new_bottom)).save(path)
 
 
@@ -108,8 +147,10 @@ def main():
     parser.add_argument(
         "--instant-id-strength",
         type=float,
-        default=0.8,
-        help="how strongly facial identity is preserved, 0-1",
+        default=0.95,
+        help="how strongly facial identity is preserved, 0-1. Raised from the model's "
+        "default of 0.8 -- likeness was reading as generic, and this is the one input "
+        "that's actually tied to this specific face rather than style/structure.",
     )
     parser.add_argument(
         "--control-image-strength",

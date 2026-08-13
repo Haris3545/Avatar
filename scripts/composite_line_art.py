@@ -22,8 +22,17 @@ Pipeline:
 4. The foreground/background split from the same segmentation model
    provides the outer silhouette outline.
 
+Pass --structure for a second, minimal mode meant as generation-model
+conditioning input (scripts/generate_avatar_instantid.py's --control-image)
+rather than a finished composite: same silhouette/hair/clothes fill, but
+facial detail comes from face-landmark geometry (jaw/face shape, eyebrows,
+nose) instead of brightness-traced texture, so it encodes this face's actual
+proportions without dictating beard/skin surface detail for a ControlNet to
+force verbatim into the output.
+
 Usage:
     python3 scripts/composite_line_art.py path/to/photo.jpg [out.png]
+    python3 scripts/composite_line_art.py path/to/photo.jpg [out.png] --structure
 """
 import sys
 import urllib.request
@@ -139,19 +148,15 @@ def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
     return np.array(img)
 
 
-def composite_line_art(photo_path: Path, out_path: Path):
-    print("Segmenting photo...")
-    im = Image.open(photo_path).convert("RGB")
-    cat_mask = segment(im)
-
+def _base_layers(im: Image.Image, cat_mask: np.ndarray):
+    """Shared groundwork for both composite modes: a white canvas with flat
+    black hair/clothes fills and a thick rounded outer silhouette outline,
+    plus the raw foreground mask for callers that need it. This part is
+    already fairly abstract (flat fills, no strand-level texture), so it's
+    fine to condition generation on -- the fine facial detail each mode adds
+    on top is where the two modes diverge."""
     gray = np.array(im.convert("L")).astype(np.float64)
     foreground = cat_mask != BACKGROUND
-    skin_mask = (cat_mask == FACE_SKIN) | (cat_mask == BODY_SKIN)
-
-    fg_vals = gray[foreground]
-    lo, hi = np.percentile(fg_vals, [2, 98]) if fg_vals.size else (0, 255)
-    gray_norm = np.clip((gray - lo) / max(hi - lo, 1) * 255, 0, 255)
-    dark_mask = skin_mask & (gray_norm < 120)
 
     # Round every shape's edges/corners to match the house style's thick,
     # rounded-cap strokes instead of raw pixel-jagged boundaries: a
@@ -168,6 +173,26 @@ def composite_line_art(photo_path: Path, out_path: Path):
     out = np.full(gray.shape + (3,), 255, dtype=np.uint8)  # white canvas
     out[hair_clothes] = (0, 0, 0)
 
+    # Outer silhouette outline, thick with rounded caps/corners
+    eroded = ndimage.binary_erosion(foreground, structure=disk(7))
+    outline = foreground & ~eroded
+    out[outline] = (0, 0, 0)
+
+    return out, foreground, gray
+
+
+def composite_line_art(photo_path: Path, out_path: Path):
+    print("Segmenting photo...")
+    im = Image.open(photo_path).convert("RGB")
+    cat_mask = segment(im)
+    out, foreground, gray = _base_layers(im, cat_mask)
+
+    skin_mask = (cat_mask == FACE_SKIN) | (cat_mask == BODY_SKIN)
+    fg_vals = gray[foreground]
+    lo, hi = np.percentile(fg_vals, [2, 98]) if fg_vals.size else (0, 255)
+    gray_norm = np.clip((gray - lo) / max(hi - lo, 1) * 255, 0, 255)
+    dark_mask = skin_mask & (gray_norm < 120)
+
     # Fine facial/skin detail (eyebrows, glasses, pupils, beard texture):
     # small dark blobs within skin only. Big ones (e.g. sunglasses) still
     # become solid fills rather than noisy detail.
@@ -178,11 +203,6 @@ def composite_line_art(photo_path: Path, out_path: Path):
         blob = labeled == i
         area = blob.sum()
         out[blob] = (0, 0, 0) if area >= big_blob_thresh else (60, 60, 60)
-
-    # Outer silhouette outline, thick with rounded caps/corners
-    eroded = ndimage.binary_erosion(foreground, structure=disk(7))
-    outline = foreground & ~eroded
-    out[outline] = (0, 0, 0)
 
     print("Detecting face landmarks for dot eyes...")
     landmarks = get_face_landmarks(im)
@@ -196,15 +216,82 @@ def composite_line_art(photo_path: Path, out_path: Path):
     print(f"Saved to {out_path}")
 
 
+def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
+    """Draw only geometric likeness cues -- face/jaw shape, eyebrow shape and
+    position, nose bridge and width -- as thin lines from real landmark
+    positions, instead of tracing brightness/texture from the photo. This is
+    for feeding a generation model as structure conditioning: a brightness
+    threshold picks up beard shadow, stubble, and skin texture as literal
+    detail (which a ControlNet then forces the output to reproduce almost
+    pixel-for-pixel, defeating the point of asking for a simplified style),
+    but these landmark connections only encode this specific face's actual
+    proportions, so they guide likeness without dictating surface detail."""
+    from mediapipe.tasks.python import vision
+
+    connections = vision.FaceLandmarksConnections
+    img = Image.fromarray(out)
+    draw = ImageDraw.Draw(img)
+
+    def draw_conns(conns, width):
+        for conn in conns:
+            p1, p2 = landmarks[conn.start], landmarks[conn.end]
+            draw.line(
+                [(p1.x * w, p1.y * h), (p2.x * w, p2.y * h)],
+                fill=(0, 0, 0),
+                width=width,
+            )
+
+    draw_conns(connections.FACE_LANDMARKS_FACE_OVAL, width=2)
+    draw_conns(connections.FACE_LANDMARKS_LEFT_EYEBROW, width=2)
+    draw_conns(connections.FACE_LANDMARKS_RIGHT_EYEBROW, width=2)
+    draw_conns(connections.FACE_LANDMARKS_NOSE, width=2)
+
+    return np.array(img)
+
+
+def structure_composite(photo_path: Path, out_path: Path):
+    """A minimal composite meant for feeding a generation model as structure
+    conditioning (unlike composite_line_art's fuller composite, which is
+    meant to look finished on its own). Keeps the silhouette and flat
+    hair/clothes fill for framing, but replaces all facial detail with
+    landmark-derived geometry instead of brightness-traced texture."""
+    print("Segmenting photo...")
+    im = Image.open(photo_path).convert("RGB")
+    cat_mask = segment(im)
+    out, foreground, gray = _base_layers(im, cat_mask)
+
+    print("Detecting face landmarks for face structure...")
+    landmarks = get_face_landmarks(im)
+    if landmarks is not None:
+        h, w = gray.shape
+        out = draw_face_structure_lines(out, landmarks, w, h)
+        out = draw_dot_eyes(out, landmarks, w, h)
+    else:
+        print("No face detected, skipping face structure lines")
+
+    Image.fromarray(out).save(out_path)
+    print(f"Saved to {out_path}")
+
+
 def main():
     if len(sys.argv) < 2:
-        sys.exit("Usage: composite_line_art.py path/to/photo.jpg [out.png]")
+        sys.exit(
+            "Usage: composite_line_art.py path/to/photo.jpg [out.png] [--structure]"
+        )
 
-    photo_path = Path(sys.argv[1])
-    out_path = Path(sys.argv[2]) if len(sys.argv) > 2 else photo_path.with_name(
-        photo_path.stem + "_lineart.png"
+    structure_mode = "--structure" in sys.argv
+    args = [a for a in sys.argv[1:] if a != "--structure"]
+
+    photo_path = Path(args[0])
+    default_suffix = "_structure" if structure_mode else "_lineart"
+    out_path = Path(args[1]) if len(args) > 1 else photo_path.with_name(
+        photo_path.stem + default_suffix + ".png"
     )
-    composite_line_art(photo_path, out_path)
+
+    if structure_mode:
+        structure_composite(photo_path, out_path)
+    else:
+        composite_line_art(photo_path, out_path)
 
 
 if __name__ == "__main__":
