@@ -202,9 +202,13 @@ def main():
     parser.add_argument(
         "--prompt-strength",
         type=float,
-        default=4.5,
+        default=7.5,
         help="CFG scale: how strongly both the positive and negative prompt are enforced. "
-        "Model default is 4.5; higher makes negative-prompt suppression (e.g. facial hair) bite harder.",
+        "Model default is 4.5; raised to 7.5 -- at instant_id_strength=0.95 (kept high "
+        "deliberately for likeness), the model was compromising between strong identity "
+        "pressure and the flat-style prompt by rendering halftone/stipple shading on the "
+        "face, which the negative prompt already forbids but wasn't being enforced hard "
+        "enough to win that fight. Higher makes negative-prompt suppression bite harder.",
     )
     parser.add_argument(
         "--prompt",
@@ -220,7 +224,9 @@ def main():
     )
     parser.add_argument(
         "--negative-prompt",
-        default="photo, photorealistic, color, colour, coloured, tinted, gradient background, "
+        default="halftone dots on face, halftone dots on skin, stipple texture on face, "
+        "dot pattern shading, dot texture skin, pointillism, dotted shading, noisy skin texture, "
+        "photo, photorealistic, color, colour, coloured, tinted, gradient background, "
         "grey background, dark background, black background, textured background, visible wall, "
         "chalkboard, vignette, "
         "sepia, muted tones, painterly, blurry, low quality, grayscale photo, "
