@@ -174,184 +174,6 @@ def _ordered_face_oval_indices():
     return order
 
 
-def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radius: float = 20, edge_threshold: float = 10, break_factor: float = 2.2):
-    """Anchor the jaw/cheek outline to real photo evidence instead of a
-    generic predicted position. The face landmarker's face-oval points are
-    a reasonable prior for roughly where the face edge is, but they're a
-    geometric prediction, not a measurement -- for likeness we want the
-    actual tonal edge between face and neck/background/hair wherever the
-    photo has one. Covers the whole face oval below the very top of the
-    forehead (not just the chin), since cheek and temple contour carry
-    likeness too, not only the chin -- restricting this to a narrow chin
-    arc lost the sides of the face entirely. For each point, search a
-    short distance along the local outward normal for the strongest
-    brightness gradient in the real photo and snap to it; where there's
-    genuinely no measurable edge nearby (flat lighting, low contrast, or
-    hair-covered), keep the landmark position rather than inventing an
-    edge that isn't there.
-
-    Simplification is left to the caller's drawing step (a light spline
-    smoothing pass), not done here, so the actual measured positions stay
-    intact for the break check below: where two neighboring points end up
-    unnaturally far apart -- one snapped to a real edge, its neighbor
-    didn't -- forcing a line between them would draw a connection that
-    isn't really there, so the sequence is split at that gap instead.
-
-    Returns a list of ordered (not closed) point-sequence segments, since
-    the real jaw evidence may not form one continuous arc. Empty list if
-    the face is too small/landmarks are missing."""
-    from scipy.ndimage import map_coordinates
-
-    # Landmarker indices for the face oval's two widest points, roughly at
-    # the cheek immediately in front of each ear -- the ear itself
-    # interrupts the jaw/cheek contour there, so the curve is always cut at
-    # these points rather than left to a smoothness heuristic to (maybe)
-    # catch it. The chin/jaw arc between them can be one continuous line;
-    # what's beyond them (temple/forehead side) is a separate, unrelated
-    # piece meeting it at a seam, not a smooth continuation of the same
-    # feature.
-    EAR_LANDMARK_IDS = {234, 454}
-
-    order = _ordered_face_oval_indices()
-    order_arr = np.array(order)
-    pts = np.array([[landmarks[i].x * w, landmarks[i].y * h] for i in order])
-    n = len(pts)
-    if n < 8:
-        return []
-
-    # Rotate so the topmost (forehead) point is first, so the jaw arc (the
-    # lower, higher-y points) forms one contiguous run without wrapping
-    # around the start/end of the array.
-    top_idx = int(np.argmin(pts[:, 1]))
-    pts = np.roll(pts, -top_idx, axis=0)
-    order_arr = np.roll(order_arr, -top_idx)
-
-    # Exclude only the very peak of the forehead -- everywhere else on the
-    # face oval (temples, cheeks, jaw, chin) gets the same real-evidence
-    # treatment. The forehead peak is skipped because it's almost always
-    # hair-covered and its "edge" would just be hair/skin, redundant with
-    # the hair silhouette drawn separately.
-    y_min, y_max = pts[:, 1].min(), pts[:, 1].max()
-    jaw_cutoff = y_min + (y_max - y_min) * 0.06
-    jaw_indices = np.where(pts[:, 1] >= jaw_cutoff)[0]
-    if jaw_indices.size < 4:
-        return []
-    lo, hi = jaw_indices.min(), jaw_indices.max()
-    jaw_pts = pts[lo : hi + 1]
-    jaw_ids = order_arr[lo : hi + 1]
-
-    centroid = pts.mean(axis=0)
-    refined = jaw_pts.copy()
-    m = len(jaw_pts)
-    for i in range(m):
-        prev_pt = jaw_pts[i - 1] if i > 0 else jaw_pts[i]
-        next_pt = jaw_pts[i + 1] if i < m - 1 else jaw_pts[i]
-        tangent = next_pt - prev_pt
-        normal = np.array([-tangent[1], tangent[0]])
-        norm_len = np.linalg.norm(normal)
-        if norm_len < 1e-6:
-            continue
-        normal = normal / norm_len
-        if np.dot(jaw_pts[i] - centroid, normal) < 0:
-            normal = -normal
-
-        ts = np.linspace(-search_radius, search_radius, int(search_radius * 2) + 1)
-        sample_pts = jaw_pts[i][None, :] + ts[:, None] * normal[None, :]
-        coords = np.stack([sample_pts[:, 1], sample_pts[:, 0]])  # map_coordinates wants (row, col)
-        values = map_coordinates(gray, coords, order=1, mode="nearest")
-        gradient = np.abs(np.diff(values))
-        if gradient.size == 0:
-            continue
-        best = int(np.argmax(gradient))
-        if gradient[best] < edge_threshold:
-            continue  # no reliable edge here -- keep the landmark position
-        refined[i] = (sample_pts[best] + sample_pts[best + 1]) / 2
-
-    # Split wherever the connection between neighbors is unnaturally long
-    # relative to the landmarks' own spacing, instead of drawing a straight
-    # jump across a gap that isn't really part of the same measured edge.
-    landmark_spacing = np.linalg.norm(np.diff(jaw_pts, axis=0), axis=1)
-    median_spacing = np.median(landmark_spacing) if landmark_spacing.size else 1.0
-    step_dists = np.linalg.norm(np.diff(refined, axis=0), axis=1)
-    break_at = set(np.where(step_dists > median_spacing * break_factor)[0].tolist())
-
-    # Also split on an anatomically implausible sharp turn -- a real
-    # jawline doesn't bend near a right angle from one point to the next,
-    # even when the two points happen to be close together (a nearby but
-    # wrong edge, e.g. a glasses arm or collar, pulled just one point off
-    # to the side). Distance alone wouldn't catch this; check the turning
-    # angle at each interior point and drop it from both neighbors if it's
-    # too sharp, rather than drawing through a corner that can't be real.
-    max_turn_degrees = 55
-    for i in range(1, m - 1):
-        v_in = refined[i] - refined[i - 1]
-        v_out = refined[i + 1] - refined[i]
-        n_in, n_out = np.linalg.norm(v_in), np.linalg.norm(v_out)
-        if n_in < 1e-6 or n_out < 1e-6:
-            continue
-        cos_angle = np.clip(np.dot(v_in, v_out) / (n_in * n_out), -1, 1)
-        turn = np.degrees(np.arccos(cos_angle))
-        if turn > max_turn_degrees:
-            break_at.add(i - 1)
-            break_at.add(i)
-
-    # Always cut at the ear points, regardless of how smoothly the measured
-    # curve happens to connect there -- the ear breaks up the contour in
-    # real anatomy even when the pixel evidence doesn't show an obvious
-    # jump or angle.
-    for i, lid in enumerate(jaw_ids):
-        if lid in EAR_LANDMARK_IDS:
-            if i - 1 >= 0:
-                break_at.add(i - 1)
-            if i < m - 1:
-                break_at.add(i)
-
-    segments = []
-    start = 0
-    for i in range(m - 1):
-        if i in break_at:
-            if i + 1 - start >= 2:
-                segments.append(refined[start : i + 1])
-            start = i + 1
-    if m - start >= 2:
-        segments.append(refined[start:])
-
-    return segments
-
-
-def draw_open_smooth_stroke(canvas: Image.Image, points, width: int = 3, supersample: int = 4) -> Image.Image:
-    """Like draw_smooth_strokes, but for a single open path (e.g. a jaw arc
-    that shouldn't close back on itself), with light smoothing to remove
-    residual per-point snap jitter without erasing the real shape it just
-    measured."""
-    if points is None or len(points) < 2:
-        return canvas
-    from scipy.interpolate import splev, splprep
-
-    x, y = points[:, 0], points[:, 1]
-    try:
-        tck, _ = splprep([x, y], s=len(x) * 0.5, per=False)
-        u = np.linspace(0, 1, max(len(x) * 4, 50))
-        xs, ys = splev(u, tck)
-        smoothed = np.stack([xs, ys], axis=1)
-    except Exception:
-        smoothed = points
-
-    w, h = canvas.size
-    big = Image.new("RGBA", (w * supersample, h * supersample), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(big)
-    scaled = [(px * supersample, py * supersample) for px, py in smoothed]
-    stroke_w = width * supersample
-    draw.line(scaled, fill=(0, 0, 0, 255), width=stroke_w, joint="curve")
-    r = stroke_w / 2
-    for px, py in (scaled[0], scaled[-1]):
-        draw.ellipse([px - r, py - r, px + r, py + r], fill=(0, 0, 0, 255))
-
-    big = big.resize((w, h), Image.LANCZOS)
-    canvas.paste(big, (0, 0), big)
-    return canvas
-
-
 def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0004, samples: int = 400, min_area_frac: float = 0.002, include_holes: bool = False):
     """Fit a smooth closed curve through each significant contour of a mask
     (hair and clothes are frequently two disconnected blobs, split by a
@@ -589,17 +411,31 @@ def composite_line_art(photo_path: Path, out_path: Path):
         area = blob.sum()
         out[blob] = (0, 0, 0) if area >= big_blob_thresh else (60, 60, 60)
 
+    out_im = Image.fromarray(out)
+    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=3)
+    out = np.array(out_im)
+
     if landmarks is not None:
         h, w = gray.shape
-        out_im = Image.fromarray(out)
-        for jaw_segment in refine_jaw_to_edges(landmarks, gray, w, h):
-            out_im = draw_open_smooth_stroke(out_im, jaw_segment, width=3)
-        out = draw_dot_eyes(np.array(out_im), landmarks, w, h)
+        out = draw_dot_eyes(out, landmarks, w, h)
     else:
         print("No face detected, skipping dot-eye replacement")
 
     Image.fromarray(out).save(out_path)
     print(f"Saved to {out_path}")
+
+
+def face_skin_contours(cat_mask: np.ndarray):
+    """The segmenter's own FACE_SKIN category already traces almost
+    exactly the jawline (see the FACE_SKIN vs BODY_SKIN comparison that
+    motivated this) -- a real semantic distinction it learned (face vs
+    neck), not a blind local pixel search. Using it directly beats
+    reconstructing the same boundary from a landmark position and
+    gradient-snapping along a short search line, which has no such
+    understanding and can grab a stronger but wrong nearby edge (glasses,
+    a collar seam, a shirt pattern) instead of the real, sometimes subtle,
+    jaw shadow."""
+    return smooth_contours(cat_mask == FACE_SKIN, min_area_frac=0.01)
 
 
 def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
@@ -647,13 +483,14 @@ def structure_composite(photo_path: Path, out_path: Path):
     landmarks = get_face_landmarks(im)
     out, foreground, gray, hair_clothes = _base_layers(im, cat_mask, landmarks)
 
+    out_im = Image.fromarray(out)
+    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=3)
+    out = np.array(out_im)
+
     if landmarks is not None:
         h, w = gray.shape
         out = draw_face_structure_lines(out, landmarks, w, h)
-        out_im = Image.fromarray(out)
-        for jaw_segment in refine_jaw_to_edges(landmarks, gray, w, h):
-            out_im = draw_open_smooth_stroke(out_im, jaw_segment, width=3)
-        out = draw_dot_eyes(np.array(out_im), landmarks, w, h)
+        out = draw_dot_eyes(out, landmarks, w, h)
     else:
         print("No face detected, skipping face structure lines")
 
@@ -682,27 +519,14 @@ def scaffold_composite(photo_path: Path, out_path: Path, mask_path: Path):
     landmarks = get_face_landmarks(im)
     out, foreground, gray, hair_clothes = _base_layers(im, cat_mask, landmarks)
 
-    mask = np.zeros(gray.shape, dtype=bool)
-    if landmarks is not None:
-        h, w = gray.shape
-        out_im = Image.fromarray(out)
-        for jaw_segment in refine_jaw_to_edges(landmarks, gray, w, h):
-            out_im = draw_open_smooth_stroke(out_im, jaw_segment, width=3)
-        out = np.array(out_im)
+    out_im = Image.fromarray(out)
+    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=3)
+    out = np.array(out_im)
 
-        # The editable region is the face oval's interior (the whole loop
-        # this time, forehead included, not just the jaw arc) minus
-        # whatever's already covered by the locked hair/clothes fill --
-        # only the visible skin needs to be editable, not hair-covered
-        # forehead that's already accounted for.
-        order = _ordered_face_oval_indices()
-        oval_pts = [(landmarks[i].x * w, landmarks[i].y * h) for i in order]
-        oval_im = Image.new("L", (w, h), 0)
-        ImageDraw.Draw(oval_im).polygon(oval_pts, fill=255)
-        oval_mask = np.array(oval_im) > 0
-        mask = oval_mask & ~hair_clothes
-    else:
-        print("No face detected, mask will be empty (nothing to inpaint)")
+    # The editable region is simply the segmenter's own FACE_SKIN area --
+    # already exactly the visible skin, not hair-covered forehead or
+    # anything outside the just-drawn outline.
+    mask = cat_mask == FACE_SKIN
 
     Image.fromarray(out).save(out_path)
     Image.fromarray((mask * 255).astype(np.uint8)).save(mask_path)
