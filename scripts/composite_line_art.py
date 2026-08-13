@@ -335,6 +335,22 @@ def reveal_ears(hair_clothes: np.ndarray, cat_mask: np.ndarray, im: Image.Image,
     return corrected
 
 
+def rembg_foreground(im: Image.Image, threshold: int = 127) -> np.ndarray:
+    """A dedicated matting model (rembg/U^2-Net) for just the foreground
+    vs. background question, instead of MediaPipe's multiclass segmenter --
+    which has to simultaneously classify hair/skin/clothes/etc, and (unlike
+    a model built for this one job) runs at a fixed, fairly low 256x256
+    internal resolution regardless of the photo's real size. Compared
+    directly against MediaPipe's own foreground mask, rembg's edge is
+    visibly cleaner (no small speckle dropouts near glasses/ear) with no
+    extra smoothing needed to get there."""
+    from rembg import remove
+
+    cutout = remove(im).convert("RGBA")
+    alpha = np.array(cutout)[:, :, 3]
+    return alpha > threshold
+
+
 def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     """Shared groundwork for both composite modes: a white canvas with flat
     black hair/clothes fills and a thick rounded outer silhouette outline,
@@ -343,7 +359,7 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     fine to condition generation on -- the fine facial detail each mode adds
     on top is where the two modes diverge."""
     gray = np.array(im.convert("L")).astype(np.float64)
-    foreground = cat_mask != BACKGROUND
+    foreground = rembg_foreground(im)
 
     # Round every shape's edges/corners to match the house style's thick,
     # rounded-cap strokes instead of raw pixel-jagged boundaries: a
@@ -352,13 +368,24 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     # and clips small spurs. Both use a disk structuring element so the
     # rounding is actually circular, not the diamond shape a default
     # cross-shaped structure would give.
-    hair_clothes = (cat_mask == HAIR) | (cat_mask == CLOTHES) | (cat_mask == OTHER)
+    # "Everything in the silhouette that isn't visible skin" instead of
+    # "whatever MediaPipe specifically labelled hair/clothes/other" --
+    # rembg's silhouette and MediaPipe's category boundaries don't agree
+    # down to the pixel (e.g. a shadow fold MediaPipe didn't confidently
+    # classify as anything), and defining the fill this way makes that
+    # kind of mismatch structurally impossible rather than something to
+    # patch over: there's no category MediaPipe could get "wrong" here
+    # that would leave a gap, since we're not asking it to positively
+    # identify hair/clothes, only to say what's skin.
+    skin = (cat_mask == FACE_SKIN) | (cat_mask == BODY_SKIN)
+    hair_clothes = foreground & ~skin
     if landmarks is not None:
         h, w = gray.shape
         hair_clothes = reveal_ears(hair_clothes, cat_mask, im, landmarks, w, h)
     kernel = disk(4)
     hair_clothes = ndimage.binary_closing(hair_clothes, structure=kernel)
     hair_clothes = ndimage.binary_opening(hair_clothes, structure=kernel)
+    hair_clothes = hair_clothes & foreground
 
     out_im = Image.fromarray(np.full(gray.shape + (3,), 255, dtype=np.uint8))
 
