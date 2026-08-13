@@ -472,9 +472,9 @@ def composite_line_art(photo_path: Path, out_path: Path):
     # for dark detail -- directional lighting casts a real shadow there
     # (falling off toward the side of the face away from the light) that
     # a brightness threshold can't tell apart from an actual feature.
-    # Real features (eyebrows, pupils, beard texture) sit more centrally
-    # on the face, so they survive the erosion; a shadow gradient hugging
-    # the boundary doesn't.
+    # Real features (glasses, pupils) sit more centrally on the face, so
+    # they survive the erosion; a shadow gradient hugging the boundary
+    # doesn't.
     #
     # Erode a hole-filled copy, not skin_mask directly: skin_mask already
     # has internal gaps wherever something (like glasses) covers the skin,
@@ -484,16 +484,51 @@ def composite_line_art(photo_path: Path, out_path: Path):
     interior_skin = ndimage.binary_erosion(filled_skin, structure=disk(18)) & skin_mask
     dark_mask = interior_skin & (gray_norm < 120)
 
-    # Fine facial/skin detail (eyebrows, glasses, pupils, beard texture):
-    # small dark blobs within skin only. Big ones (e.g. sunglasses) still
-    # become solid fills rather than noisy detail.
+    # Small dark blobs (beard shadow, stubble, skin texture) are dropped
+    # entirely instead of being painted as a mid-grey stipple -- a flat
+    # reference avatar has no halftone texture and only ever uses a couple
+    # of flat shades, so tracing brightness noise as "detail" just reads as
+    # washed out. Eyebrows and the nose are instead drawn as clean landmark
+    # lines below, not thresholded from the photo.
+    #
+    # Glasses are the exception: a thin frame is made of many small,
+    # individually-tiny dark blobs (reflections and pixel gaps break it
+    # into disconnected pieces), so the same size threshold that correctly
+    # drops stubble would also drop the glasses entirely. Keep all blob
+    # sizes within a padded box around the eyes/eyebrows -- where a small
+    # dark blob is glasses detail, not skin texture -- and only apply the
+    # size threshold outside it.
+    if landmarks is not None:
+        from mediapipe.tasks.python import vision
+
+        h, w = gray.shape
+        eye_idx = set()
+        for conns in (
+            vision.FaceLandmarksConnections.FACE_LANDMARKS_LEFT_EYE,
+            vision.FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_EYE,
+            vision.FaceLandmarksConnections.FACE_LANDMARKS_LEFT_EYEBROW,
+            vision.FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_EYEBROW,
+        ):
+            for c in conns:
+                eye_idx.add(c.start)
+                eye_idx.add(c.end)
+        xs = [landmarks[i].x * w for i in eye_idx]
+        ys = [landmarks[i].y * h for i in eye_idx]
+        pad_x, pad_y = (max(xs) - min(xs)) * 0.35, (max(ys) - min(ys)) * 1.4
+        gx0, gx1 = min(xs) - pad_x, max(xs) + pad_x
+        gy0, gy1 = min(ys) - pad_y, max(ys) + pad_y
+        glasses_region = np.zeros_like(dark_mask)
+        glasses_region[int(gy0) : int(gy1), int(gx0) : int(gx1)] = True
+    else:
+        glasses_region = np.zeros_like(dark_mask)
+
     fg_area = foreground.sum()
     big_blob_thresh = fg_area * 0.015
     labeled, num = ndimage.label(dark_mask)
     for i in range(1, num + 1):
         blob = labeled == i
-        area = blob.sum()
-        out[blob] = (0, 0, 0) if area >= big_blob_thresh else (60, 60, 60)
+        if blob.sum() >= big_blob_thresh or (blob & glasses_region).any():
+            out[blob] = (0, 0, 0)
 
     out_im = Image.fromarray(out)
     out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=5)
@@ -501,9 +536,10 @@ def composite_line_art(photo_path: Path, out_path: Path):
 
     if landmarks is not None:
         h, w = gray.shape
+        out = draw_face_structure_lines(out, landmarks, w, h)
         out = draw_dot_eyes(out, landmarks, w, h)
     else:
-        print("No face detected, skipping dot-eye replacement")
+        print("No face detected, skipping face structure lines and dot-eye replacement")
 
     Image.fromarray(out).save(out_path)
     print(f"Saved to {out_path}")
@@ -549,7 +585,22 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int) -> np.
 
     draw_conns(connections.FACE_LANDMARKS_LEFT_EYEBROW, width=3)
     draw_conns(connections.FACE_LANDMARKS_RIGHT_EYEBROW, width=3)
-    draw_conns(connections.FACE_LANDMARKS_NOSE, width=3)
+
+    # Just the line under the nose (nostril hook to nostril hook), not the
+    # full nose mesh (bridge + nostril wings + tip outline) -- matches the
+    # reference avatars, which only ever mark the nose with a single simple
+    # under-nose curve that hooks up at each nostril. A raw polyline through
+    # these landmarks has visible straight-segment kinks at each point; a
+    # light spline keeps the actual up-down-up-down nostril shape (unlike a
+    # heavier smoothing, which averages it into one plain arc) while making
+    # it read as one fluid stroke.
+    from scipy.interpolate import splev, splprep
+
+    nose_bottom_idx = [49, 129, 98, 2, 327, 358, 279]
+    pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in nose_bottom_idx])
+    tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
+    xs, ys = splev(np.linspace(0, 1, 40), tck)
+    draw.line(list(zip(xs, ys)), fill=(0, 0, 0), width=3, joint="curve")
 
     return np.array(img)
 
