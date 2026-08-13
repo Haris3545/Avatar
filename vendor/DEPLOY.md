@@ -58,6 +58,27 @@ with two fixes:
    `latent_image` away from its default (`51`), so old behavior is
    unchanged.
 
+   Two follow-up fixes to this same masked path, found by testing it
+   end-to-end:
+
+   - Node 5 (`SaveImage`) originally pulled straight from the sampler's
+     own decoded output, which re-decodes the *entire* canvas through
+     the VAE -- including the region outside the mask that's supposed to
+     stay pixel-identical. SDXL's VAE has a known precision artifact
+     that shows up as speckle noise on flat/light regions, visible
+     across the whole image, not just the masked area. Node 105
+     (`ImageCompositeMasked`) now pastes the generated region onto node
+     101's real pixels using the mask, and `update_workflow` rewires
+     node 5 to read from it whenever `mask` is given -- everything
+     outside the mask is now the scaffold verbatim, no VAE roundtrip.
+   - `denoise` defaulted to 0.65, tuned for the old whole-photo img2img
+     mode where there's real photo detail worth partially preserving.
+     The masked region starts from the scaffold's blank/white interior
+     instead, so at 0.65 the sampler didn't get enough steps to paint an
+     actual face onto blank canvas -- it just barely perturbed it.
+     `update_workflow` now forces `denoise = 1.0` whenever `mask` is
+     given, regardless of the caller's `denoising_strength`.
+
 This needs to be built and pushed as your own Replicate model, since we
 can't modify fofr's hosted copy. Building it needs Docker, which isn't
 available either in this sandbox (network-blocked from Replicate's

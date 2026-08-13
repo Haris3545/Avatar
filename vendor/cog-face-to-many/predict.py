@@ -172,6 +172,30 @@ class Predictor(BasePredictor):
             mask_load_image["image"] = kwargs["mask_filename"]
             sampler["latent_image"] = ["104", 0]
 
+            # The masked region starts from the scaffold's blank/white
+            # interior, not real photo detail -- there's nothing worth
+            # partially preserving there, so force full regeneration
+            # regardless of the caller's denoising_strength (which is
+            # tuned for the old whole-photo img2img mode). At the
+            # previous partial-denoise default, the sampler didn't get
+            # enough steps to paint an actual face onto blank canvas and
+            # produced barely-perturbed noise instead.
+            sampler["denoise"] = 1.0
+
+            # SaveImage (node 5) otherwise pulls the KSampler's own
+            # decoded output directly -- which re-decodes the *entire*
+            # canvas through the VAE, including the region outside the
+            # mask that's supposed to stay pixel-identical to the
+            # scaffold. SDXL's VAE has a known precision artifact that
+            # shows up as speckle noise on flat/light regions, visible
+            # across the whole image even far from the masked area.
+            # Node 105 composites the generated region back onto the
+            # scaffold's real pixels using the mask, so everything
+            # outside it is the scaffold verbatim -- no VAE roundtrip,
+            # no noise.
+            save_image = workflow["5"]["inputs"]
+            save_image["images"] = ["105", 0]
+
     def style_to_prompt(self, style, prompt):
         style_prompts = {
             "3D": f"3D Render Style, 3DRenderAF, {prompt}",

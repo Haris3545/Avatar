@@ -504,5 +504,28 @@
     "_meta": {
       "title": "VAE Encode (for Inpainting)"
     }
+  },
+  "105": {
+    "inputs": {
+      "destination": [
+        "101",
+        0
+      ],
+      "source": [
+        "4",
+        5
+      ],
+      "mask": [
+        "103",
+        0
+      ],
+      "x": 0,
+      "y": 0,
+      "resize_source": false
+    },
+    "class_type": "ImageCompositeMasked",
+    "_meta": {
+      "title": "Composite Generated Region Onto Scaffold"
+    }
   }
 }
