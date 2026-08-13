@@ -345,20 +345,25 @@ def rembg_foreground(im: Image.Image, threshold: int = 127) -> np.ndarray:
     built for this one job) runs at a fixed, fairly low 256x256 internal
     resolution regardless of the photo's real size.
 
-    Uses rembg's birefnet-portrait model specifically, not its faster
-    u2net default: on a photo with dark hair against a dark, textured
-    background (a chalkboard), u2net's foreground mask included a chunk
-    of the shadowed wall next to the head as if it were hair, extending
-    the silhouette well past the real hairline -- birefnet-portrait (a
-    heavier transformer model, trained specifically on portraits) doesn't
-    make that mistake on the same photo. It's meaningfully slower
-    (~30-60s vs ~1-2s on CPU), but this runs once per photo, not
-    real-time, so the accuracy is worth the wait."""
+    Uses rembg's birefnet-portrait model by default, not its faster u2net
+    default: on a photo with dark hair against a dark, textured background
+    (a chalkboard), u2net's foreground mask included a chunk of the
+    shadowed wall next to the head as if it were hair, extending the
+    silhouette well past the real hairline -- birefnet-portrait (a heavier
+    transformer model, trained specifically on portraits) doesn't make
+    that mistake on the same photo. It's meaningfully slower on CPU. Set
+    the AVATAR_REMBG_MODEL env var (e.g. to "u2net") to override, for
+    quick iteration when you don't need the extra accuracy on a
+    particular photo."""
+    import os
+
     from rembg import new_session, remove
 
+    model_name = os.environ.get("AVATAR_REMBG_MODEL", "birefnet-portrait")
+
     global _REMBG_SESSION
-    if _REMBG_SESSION is None:
-        _REMBG_SESSION = new_session("birefnet-portrait")
+    if _REMBG_SESSION is None or _REMBG_SESSION.model_name != model_name:
+        _REMBG_SESSION = new_session(model_name)
 
     cutout = remove(im, session=_REMBG_SESSION).convert("RGBA")
     alpha = np.array(cutout)[:, :, 3]
