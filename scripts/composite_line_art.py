@@ -148,7 +148,133 @@ def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
     return np.array(img)
 
 
-def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0015, samples: int = 400, min_area_frac: float = 0.002):
+def _ordered_face_oval_indices():
+    """FACE_LANDMARKS_FACE_OVAL is a set of disjoint (start, end) segment
+    pairs that together form one loop, not a pre-ordered walk around it --
+    reconstruct the walk by following each point's two neighbors."""
+    from mediapipe.tasks.python import vision
+
+    connections = vision.FaceLandmarksConnections.FACE_LANDMARKS_FACE_OVAL
+    adjacency = {}
+    for c in connections:
+        adjacency.setdefault(c.start, []).append(c.end)
+        adjacency.setdefault(c.end, []).append(c.start)
+    start = next(iter(adjacency))
+    order = [start]
+    prev, cur = None, start
+    while True:
+        neighbors = [n for n in adjacency[cur] if n != prev]
+        if not neighbors:
+            break
+        nxt = neighbors[0]
+        if nxt == start:
+            break
+        order.append(nxt)
+        prev, cur = cur, nxt
+    return order
+
+
+def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radius: float = 20, edge_threshold: float = 10):
+    """Anchor the jaw/chin outline to real photo evidence instead of a
+    generic predicted position. The face landmarker's face-oval points are
+    a reasonable prior for roughly where the jaw is, but they're a
+    geometric prediction, not a measurement -- for likeness we want the
+    actual tonal edge between face and neck/background wherever the photo
+    has one. For each face-oval point below eye level (the jaw/chin arc,
+    not the forehead/temples which are usually hair-covered anyway),
+    search a short distance along the local outward normal for the
+    strongest brightness gradient in the real photo and snap to it; where
+    there's genuinely no measurable edge nearby (flat lighting, low
+    contrast), keep the landmark position rather than inventing an edge
+    that isn't there.
+
+    Returns an ordered (not closed) point sequence for just the jaw arc, or
+    None if the face is too small/landmarks are missing."""
+    from scipy.ndimage import map_coordinates
+
+    order = _ordered_face_oval_indices()
+    pts = np.array([[landmarks[i].x * w, landmarks[i].y * h] for i in order])
+    n = len(pts)
+    if n < 8:
+        return None
+
+    # Rotate so the topmost (forehead) point is first, so the jaw arc (the
+    # lower, higher-y points) forms one contiguous run without wrapping
+    # around the start/end of the array.
+    top_idx = int(np.argmin(pts[:, 1]))
+    pts = np.roll(pts, -top_idx, axis=0)
+
+    y_min, y_max = pts[:, 1].min(), pts[:, 1].max()
+    jaw_cutoff = y_min + (y_max - y_min) * 0.55
+    jaw_indices = np.where(pts[:, 1] >= jaw_cutoff)[0]
+    if jaw_indices.size < 4:
+        return None
+    jaw_pts = pts[jaw_indices.min() : jaw_indices.max() + 1]
+
+    centroid = pts.mean(axis=0)
+    refined = jaw_pts.copy()
+    m = len(jaw_pts)
+    for i in range(m):
+        prev_pt = jaw_pts[i - 1] if i > 0 else jaw_pts[i]
+        next_pt = jaw_pts[i + 1] if i < m - 1 else jaw_pts[i]
+        tangent = next_pt - prev_pt
+        normal = np.array([-tangent[1], tangent[0]])
+        norm_len = np.linalg.norm(normal)
+        if norm_len < 1e-6:
+            continue
+        normal = normal / norm_len
+        if np.dot(jaw_pts[i] - centroid, normal) < 0:
+            normal = -normal
+
+        ts = np.linspace(-search_radius, search_radius, int(search_radius * 2) + 1)
+        sample_pts = jaw_pts[i][None, :] + ts[:, None] * normal[None, :]
+        coords = np.stack([sample_pts[:, 1], sample_pts[:, 0]])  # map_coordinates wants (row, col)
+        values = map_coordinates(gray, coords, order=1, mode="nearest")
+        gradient = np.abs(np.diff(values))
+        if gradient.size == 0:
+            continue
+        best = int(np.argmax(gradient))
+        if gradient[best] < edge_threshold:
+            continue  # no reliable edge here -- keep the landmark position
+        refined[i] = (sample_pts[best] + sample_pts[best + 1]) / 2
+
+    return refined
+
+
+def draw_open_smooth_stroke(canvas: Image.Image, points, width: int = 3, supersample: int = 4) -> Image.Image:
+    """Like draw_smooth_strokes, but for a single open path (e.g. a jaw arc
+    that shouldn't close back on itself), with light smoothing to remove
+    residual per-point snap jitter without erasing the real shape it just
+    measured."""
+    if points is None or len(points) < 2:
+        return canvas
+    from scipy.interpolate import splev, splprep
+
+    x, y = points[:, 0], points[:, 1]
+    try:
+        tck, _ = splprep([x, y], s=len(x) * 0.5, per=False)
+        u = np.linspace(0, 1, max(len(x) * 4, 50))
+        xs, ys = splev(u, tck)
+        smoothed = np.stack([xs, ys], axis=1)
+    except Exception:
+        smoothed = points
+
+    w, h = canvas.size
+    big = Image.new("RGBA", (w * supersample, h * supersample), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(big)
+    scaled = [(px * supersample, py * supersample) for px, py in smoothed]
+    stroke_w = width * supersample
+    draw.line(scaled, fill=(0, 0, 0, 255), width=stroke_w, joint="curve")
+    r = stroke_w / 2
+    for px, py in (scaled[0], scaled[-1]):
+        draw.ellipse([px - r, py - r, px + r, py + r], fill=(0, 0, 0, 255))
+
+    big = big.resize((w, h), Image.LANCZOS)
+    canvas.paste(big, (0, 0), big)
+    return canvas
+
+
+def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0004, samples: int = 400, min_area_frac: float = 0.002):
     """Fit a smooth closed curve through each significant contour of a mask
     (hair and clothes are frequently two disconnected blobs, split by a
     visible neck), instead of using the mask's raw pixel-jagged boundary
@@ -178,7 +304,11 @@ def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0015, samples: int
 
         x, y = approx[:, 0].astype(np.float64), approx[:, 1].astype(np.float64)
         try:
-            tck, _ = splprep([x, y], s=len(x) * 2, per=True)
+            # A light smoothing factor here -- just enough to round pixel-
+            # level jitter left over from approxPolyDP, not so much that it
+            # averages away real concave/convex shape features (a jaw
+            # angle, a chin point) that carry likeness.
+            tck, _ = splprep([x, y], s=len(x) * 0.15, per=True)
             u = np.linspace(0, 1, samples)
             xs, ys = splev(u, tck)
             smoothed.append(np.stack([xs, ys], axis=1))
@@ -298,11 +428,14 @@ def composite_line_art(photo_path: Path, out_path: Path):
         area = blob.sum()
         out[blob] = (0, 0, 0) if area >= big_blob_thresh else (60, 60, 60)
 
-    print("Detecting face landmarks for dot eyes...")
+    print("Detecting face landmarks for dot eyes and jaw line...")
     landmarks = get_face_landmarks(im)
     if landmarks is not None:
         h, w = gray.shape
-        out = draw_dot_eyes(out, landmarks, w, h)
+        out_im = Image.fromarray(out)
+        jaw = refine_jaw_to_edges(landmarks, gray, w, h)
+        out_im = draw_open_smooth_stroke(out_im, jaw, width=3)
+        out = draw_dot_eyes(np.array(out_im), landmarks, w, h)
     else:
         print("No face detected, skipping dot-eye replacement")
 
@@ -335,7 +468,6 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int) -> np.
                 width=width,
             )
 
-    draw_conns(connections.FACE_LANDMARKS_FACE_OVAL, width=2)
     draw_conns(connections.FACE_LANDMARKS_LEFT_EYEBROW, width=2)
     draw_conns(connections.FACE_LANDMARKS_RIGHT_EYEBROW, width=2)
     draw_conns(connections.FACE_LANDMARKS_NOSE, width=2)
@@ -359,7 +491,10 @@ def structure_composite(photo_path: Path, out_path: Path):
     if landmarks is not None:
         h, w = gray.shape
         out = draw_face_structure_lines(out, landmarks, w, h)
-        out = draw_dot_eyes(out, landmarks, w, h)
+        out_im = Image.fromarray(out)
+        jaw = refine_jaw_to_edges(landmarks, gray, w, h)
+        out_im = draw_open_smooth_stroke(out_im, jaw, width=3)
+        out = draw_dot_eyes(np.array(out_im), landmarks, w, h)
     else:
         print("No face detected, skipping face structure lines")
 
