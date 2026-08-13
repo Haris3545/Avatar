@@ -43,6 +43,10 @@ from PIL import Image, ImageDraw
 
 MODEL = "haris3545/face-to-many-patched:0ce8eb4a35fb953df2f14515d5b080ba61819bb78ab0d43c6d1b99677dc75265"
 
+# vendor/TRAINING.md tracks the latest LoRA weights URL from
+# scripts/train_lora.py -- pass it via --lora-weights, it's not baked in
+# here since it changes independently of the generation model version above.
+
 
 def _color_dist(a, b):
     return sum((a[i] - b[i]) ** 2 for i in range(3)) ** 0.5
