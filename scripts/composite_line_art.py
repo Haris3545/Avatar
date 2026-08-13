@@ -435,7 +435,21 @@ def composite_line_art(photo_path: Path, out_path: Path):
     fg_vals = gray[foreground]
     lo, hi = np.percentile(fg_vals, [2, 98]) if fg_vals.size else (0, 255)
     gray_norm = np.clip((gray - lo) / max(hi - lo, 1) * 255, 0, 255)
-    dark_mask = skin_mask & (gray_norm < 120)
+    # Erode away a margin near the skin's own *outer* edge before looking
+    # for dark detail -- directional lighting casts a real shadow there
+    # (falling off toward the side of the face away from the light) that
+    # a brightness threshold can't tell apart from an actual feature.
+    # Real features (eyebrows, pupils, beard texture) sit more centrally
+    # on the face, so they survive the erosion; a shadow gradient hugging
+    # the boundary doesn't.
+    #
+    # Erode a hole-filled copy, not skin_mask directly: skin_mask already
+    # has internal gaps wherever something (like glasses) covers the skin,
+    # and eroding it directly pulls back from those internal edges too --
+    # eating exactly the glasses detail this is supposed to leave alone.
+    filled_skin = ndimage.binary_fill_holes(skin_mask)
+    interior_skin = ndimage.binary_erosion(filled_skin, structure=disk(18)) & skin_mask
+    dark_mask = interior_skin & (gray_norm < 120)
 
     # Fine facial/skin detail (eyebrows, glasses, pupils, beard texture):
     # small dark blobs within skin only. Big ones (e.g. sunglasses) still
