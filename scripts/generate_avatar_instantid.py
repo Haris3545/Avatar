@@ -226,6 +226,8 @@ def main():
         "--negative-prompt",
         default="halftone dots on face, halftone dots on skin, stipple texture on face, "
         "dot pattern shading, dot texture skin, pointillism, dotted shading, noisy skin texture, "
+        "individual hair strands, visible individual stubble hairs, fine stubble detail, "
+        "realistic beard texture, textured beard, scattered facial hair marks, "
         "photo, photorealistic, color, colour, coloured, tinted, gradient background, "
         "grey background, dark background, black background, textured background, visible wall, "
         "chalkboard, vignette, "
