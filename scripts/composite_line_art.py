@@ -174,7 +174,7 @@ def _ordered_face_oval_indices():
     return order
 
 
-def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0004, samples: int = 400, min_area_frac: float = 0.002, include_holes: bool = False):
+def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0004, samples: int = 400, min_area_frac: float = 0.002, include_holes: bool = False, smoothing: float = 0.15):
     """Fit a smooth closed curve through each significant contour of a mask
     (hair and clothes are frequently two disconnected blobs, split by a
     visible neck), instead of using the mask's raw pixel-jagged boundary
@@ -210,11 +210,13 @@ def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0004, samples: int
 
         x, y = approx[:, 0].astype(np.float64), approx[:, 1].astype(np.float64)
         try:
-            # A light smoothing factor here -- just enough to round pixel-
-            # level jitter left over from approxPolyDP, not so much that it
-            # averages away real concave/convex shape features (a jaw
-            # angle, a chin point) that carry likeness.
-            tck, _ = splprep([x, y], s=len(x) * 0.15, per=True)
+            # `smoothing` trades real shape detail against noise removal --
+            # kept light by default so real concave/convex features (a jaw
+            # angle, a chin point) survive, but callers with a genuinely
+            # noisy boundary (e.g. dark hair against a dark, textured
+            # background, where segmentation itself is less certain
+            # pixel-to-pixel) can turn it up.
+            tck, _ = splprep([x, y], s=len(x) * smoothing, per=True)
             u = np.linspace(0, 1, samples)
             xs, ys = splev(u, tck)
             return np.stack([xs, ys], axis=1)
@@ -373,15 +375,23 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     # ring shape with the face as a hole in the middle. Filling only the
     # outer contour would ignore that hole and paint solid black straight
     # over the face.
+    #
+    # Extra smoothing here (vs. the tighter default used for FACE_SKIN):
+    # dark hair against a dark, textured background (a chalkboard, a
+    # shadowed wall) is exactly where the segmenter's pixel-to-pixel
+    # boundary is least certain, since there's little real contrast to go
+    # on -- unlike the jaw/face edge, this noise isn't real shape detail
+    # worth preserving.
     hair_clothes_outer, hair_clothes_holes = smooth_contours(
-        hair_clothes, min_area_frac=0.001, include_holes=True
+        hair_clothes, min_area_frac=0.001, include_holes=True, smoothing=1.5
     )
-    silhouette_contours = smooth_contours(foreground)
+    silhouette_contours = smooth_contours(foreground, smoothing=1.5)
 
     out_im = draw_smooth_fills(out_im, hair_clothes_outer)
     out_im = draw_smooth_fills(out_im, hair_clothes_holes, fill=(255, 255, 255))
-    out_im = draw_smooth_strokes(out_im, silhouette_contours, width=4)
-    out_im = draw_smooth_strokes(out_im, hair_clothes_outer, width=4)
+    out_im = draw_smooth_strokes(out_im, silhouette_contours, width=6)
+    out_im = draw_smooth_strokes(out_im, hair_clothes_outer, width=6)
+    out_im = draw_smooth_strokes(out_im, hair_clothes_holes, width=6)
 
     return np.array(out_im), foreground, gray, hair_clothes
 
@@ -412,7 +422,7 @@ def composite_line_art(photo_path: Path, out_path: Path):
         out[blob] = (0, 0, 0) if area >= big_blob_thresh else (60, 60, 60)
 
     out_im = Image.fromarray(out)
-    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=3)
+    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=5)
     out = np.array(out_im)
 
     if landmarks is not None:
@@ -463,9 +473,9 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int) -> np.
                 width=width,
             )
 
-    draw_conns(connections.FACE_LANDMARKS_LEFT_EYEBROW, width=2)
-    draw_conns(connections.FACE_LANDMARKS_RIGHT_EYEBROW, width=2)
-    draw_conns(connections.FACE_LANDMARKS_NOSE, width=2)
+    draw_conns(connections.FACE_LANDMARKS_LEFT_EYEBROW, width=3)
+    draw_conns(connections.FACE_LANDMARKS_RIGHT_EYEBROW, width=3)
+    draw_conns(connections.FACE_LANDMARKS_NOSE, width=3)
 
     return np.array(img)
 
@@ -484,7 +494,7 @@ def structure_composite(photo_path: Path, out_path: Path):
     out, foreground, gray, hair_clothes = _base_layers(im, cat_mask, landmarks)
 
     out_im = Image.fromarray(out)
-    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=3)
+    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=5)
     out = np.array(out_im)
 
     if landmarks is not None:
@@ -520,7 +530,7 @@ def scaffold_composite(photo_path: Path, out_path: Path, mask_path: Path):
     out, foreground, gray, hair_clothes = _base_layers(im, cat_mask, landmarks)
 
     out_im = Image.fromarray(out)
-    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=3)
+    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=5)
     out = np.array(out_im)
 
     # The editable region is simply the segmenter's own FACE_SKIN area --
