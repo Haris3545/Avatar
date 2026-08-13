@@ -352,33 +352,39 @@ def draw_open_smooth_stroke(canvas: Image.Image, points, width: int = 3, supersa
     return canvas
 
 
-def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0004, samples: int = 400, min_area_frac: float = 0.002):
+def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0004, samples: int = 400, min_area_frac: float = 0.002, include_holes: bool = False):
     """Fit a smooth closed curve through each significant contour of a mask
     (hair and clothes are frequently two disconnected blobs, split by a
     visible neck), instead of using the mask's raw pixel-jagged boundary
     directly. cv2.approxPolyDP strips pixel-level jitter while keeping this
     specific mask's actual shape (not a generic template), then a periodic
     spline through those points gives a fluid curve rather than a polygon
-    of straight segments."""
+    of straight segments.
+
+    With include_holes=True, returns (outer_contours, hole_contours)
+    instead of a flat list -- needed whenever the mask can have a hole in
+    it (e.g. hair that fully rings a visible face, like long hair framing
+    both sides of it), since filling only the external contour would
+    ignore the hole and paint solid straight over the face inside it."""
     import cv2
     from scipy.interpolate import splev, splprep
 
     mask_u8 = mask.astype(np.uint8) * 255
-    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    mode = cv2.RETR_CCOMP if include_holes else cv2.RETR_EXTERNAL
+    contours, hierarchy = cv2.findContours(mask_u8, mode, cv2.CHAIN_APPROX_NONE)
     if not contours:
-        return []
+        return ([], []) if include_holes else []
     min_area = mask.size * min_area_frac
 
-    smoothed = []
-    for contour in contours:
+    def smooth_one(contour):
         contour = contour.astype(np.float32)
         if cv2.contourArea(contour) < min_area or contour.shape[0] < 8:
-            continue
+            return None
 
         peri = cv2.arcLength(contour, True)
         approx = cv2.approxPolyDP(contour, epsilon_frac * peri, True).squeeze(1)
         if approx.shape[0] < 4:
-            continue
+            return None
 
         x, y = approx[:, 0].astype(np.float64), approx[:, 1].astype(np.float64)
         try:
@@ -389,11 +395,23 @@ def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0004, samples: int
             tck, _ = splprep([x, y], s=len(x) * 0.15, per=True)
             u = np.linspace(0, 1, samples)
             xs, ys = splev(u, tck)
-            smoothed.append(np.stack([xs, ys], axis=1))
+            return np.stack([xs, ys], axis=1)
         except Exception:
-            smoothed.append(approx)
+            return approx
 
-    return smoothed
+    if not include_holes:
+        return [s for c in contours if (s := smooth_one(c)) is not None]
+
+    outer, holes = [], []
+    for idx, contour in enumerate(contours):
+        smoothed = smooth_one(contour)
+        if smoothed is None:
+            continue
+        # hierarchy[0][idx] = (next, previous, first_child, parent);
+        # parent == -1 means top-level (outer), anything else is a hole.
+        parent = hierarchy[0][idx][3]
+        (outer if parent == -1 else holes).append(smoothed)
+    return outer, holes
 
 
 def draw_smooth_strokes(canvas: Image.Image, contours, width: int = 4, supersample: int = 4) -> Image.Image:
@@ -473,12 +491,21 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray):
     # actual shape, instead of a stair-stepped edge. hair_clothes.min_area
     # is kept low since hair and clothes are frequently two disconnected
     # blobs, split by a visible neck, and both matter.
-    hair_clothes_contours = smooth_contours(hair_clothes, min_area_frac=0.001)
+    #
+    # include_holes=True matters here specifically: hair that frames both
+    # sides of a visible face (rather than just sitting above it) makes a
+    # ring shape with the face as a hole in the middle. Filling only the
+    # outer contour would ignore that hole and paint solid black straight
+    # over the face.
+    hair_clothes_outer, hair_clothes_holes = smooth_contours(
+        hair_clothes, min_area_frac=0.001, include_holes=True
+    )
     silhouette_contours = smooth_contours(foreground)
 
-    out_im = draw_smooth_fills(out_im, hair_clothes_contours)
+    out_im = draw_smooth_fills(out_im, hair_clothes_outer)
+    out_im = draw_smooth_fills(out_im, hair_clothes_holes, fill=(255, 255, 255))
     out_im = draw_smooth_strokes(out_im, silhouette_contours, width=4)
-    out_im = draw_smooth_strokes(out_im, hair_clothes_contours, width=4)
+    out_im = draw_smooth_strokes(out_im, hair_clothes_outer, width=4)
 
     return np.array(out_im), foreground, gray
 
