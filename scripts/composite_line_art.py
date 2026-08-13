@@ -254,6 +254,26 @@ def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radi
     step_dists = np.linalg.norm(np.diff(refined, axis=0), axis=1)
     break_at = set(np.where(step_dists > median_spacing * break_factor)[0].tolist())
 
+    # Also split on an anatomically implausible sharp turn -- a real
+    # jawline doesn't bend near a right angle from one point to the next,
+    # even when the two points happen to be close together (a nearby but
+    # wrong edge, e.g. a glasses arm or collar, pulled just one point off
+    # to the side). Distance alone wouldn't catch this; check the turning
+    # angle at each interior point and drop it from both neighbors if it's
+    # too sharp, rather than drawing through a corner that can't be real.
+    max_turn_degrees = 55
+    for i in range(1, m - 1):
+        v_in = refined[i] - refined[i - 1]
+        v_out = refined[i + 1] - refined[i]
+        n_in, n_out = np.linalg.norm(v_in), np.linalg.norm(v_out)
+        if n_in < 1e-6 or n_out < 1e-6:
+            continue
+        cos_angle = np.clip(np.dot(v_in, v_out) / (n_in * n_out), -1, 1)
+        turn = np.degrees(np.arccos(cos_angle))
+        if turn > max_turn_degrees:
+            break_at.add(i - 1)
+            break_at.add(i)
+
     segments = []
     start = 0
     for i in range(m - 1):
