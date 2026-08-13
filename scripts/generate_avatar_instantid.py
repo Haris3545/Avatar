@@ -235,7 +235,18 @@ def main():
         "visible teeth, tongue, "
         "realistic eyes, detailed iris, photorealistic skin texture, dense stippling, "
         "intricate fine detail, engraving texture, fabric texture detail, fabric pattern, "
-        "floral print, patterned clothing, full body, torso, waist",
+        "floral print, patterned clothing, full body, torso, waist, "
+        "broken glasses frame, gapped glasses outline, dashed glasses lines, "
+        "disconnected glasses frame, glasses frame with gaps, fragmented eyewear outline, "
+        "glasses drawn as dots or dashes",
+    )
+    parser.add_argument(
+        "--glasses",
+        action="store_true",
+        help="this specific photo shows the subject wearing glasses -- reinforce that the frame "
+        "should render as one continuous solid black shape. The model tends to draw the frame as "
+        "many small disconnected dark marks (echoing how it renders stubble) instead of a single "
+        "unbroken outline, since nothing in the base prompt says a frame should be continuous.",
     )
     parser.add_argument(
         "--no-facial-hair",
@@ -261,6 +272,13 @@ def main():
         args.negative_prompt += (
             ", beard, facial hair, stubble, goatee, moustache, mustache, beard shadow, "
             "beard, facial hair, stubble"  # repeated for extra negative-prompt weight
+        )
+
+    if args.glasses:
+        args.prompt += (
+            ", wearing glasses, glasses frame drawn as one continuous solid black unbroken "
+            "outline, thick solid uninterrupted glasses frame lines, single fluid stroke per "
+            "lens rim with no breaks"
         )
 
     negative_prompt = args.negative_prompt
