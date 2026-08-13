@@ -202,7 +202,18 @@ def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radi
     the face is too small/landmarks are missing."""
     from scipy.ndimage import map_coordinates
 
+    # Landmarker indices for the face oval's two widest points, roughly at
+    # the cheek immediately in front of each ear -- the ear itself
+    # interrupts the jaw/cheek contour there, so the curve is always cut at
+    # these points rather than left to a smoothness heuristic to (maybe)
+    # catch it. The chin/jaw arc between them can be one continuous line;
+    # what's beyond them (temple/forehead side) is a separate, unrelated
+    # piece meeting it at a seam, not a smooth continuation of the same
+    # feature.
+    EAR_LANDMARK_IDS = {234, 454}
+
     order = _ordered_face_oval_indices()
+    order_arr = np.array(order)
     pts = np.array([[landmarks[i].x * w, landmarks[i].y * h] for i in order])
     n = len(pts)
     if n < 8:
@@ -213,6 +224,7 @@ def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radi
     # around the start/end of the array.
     top_idx = int(np.argmin(pts[:, 1]))
     pts = np.roll(pts, -top_idx, axis=0)
+    order_arr = np.roll(order_arr, -top_idx)
 
     # Exclude only the very peak of the forehead -- everywhere else on the
     # face oval (temples, cheeks, jaw, chin) gets the same real-evidence
@@ -224,7 +236,9 @@ def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radi
     jaw_indices = np.where(pts[:, 1] >= jaw_cutoff)[0]
     if jaw_indices.size < 4:
         return []
-    jaw_pts = pts[jaw_indices.min() : jaw_indices.max() + 1]
+    lo, hi = jaw_indices.min(), jaw_indices.max()
+    jaw_pts = pts[lo : hi + 1]
+    jaw_ids = order_arr[lo : hi + 1]
 
     centroid = pts.mean(axis=0)
     refined = jaw_pts.copy()
@@ -280,6 +294,17 @@ def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radi
         if turn > max_turn_degrees:
             break_at.add(i - 1)
             break_at.add(i)
+
+    # Always cut at the ear points, regardless of how smoothly the measured
+    # curve happens to connect there -- the ear breaks up the contour in
+    # real anatomy even when the pixel evidence doesn't show an obvious
+    # jump or angle.
+    for i, lid in enumerate(jaw_ids):
+        if lid in EAR_LANDMARK_IDS:
+            if i - 1 >= 0:
+                break_at.add(i - 1)
+            if i < m - 1:
+                break_at.add(i)
 
     segments = []
     start = 0
