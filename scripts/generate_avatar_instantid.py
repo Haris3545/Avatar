@@ -24,7 +24,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-MODEL = "haris3545/face-to-many-patched:23fa40cce79b99e79601804a5e800c7fba0bfef11ea7ac15e9dada604ba26951"
+MODEL = "haris3545/face-to-many-patched:a90b20231412c6faca3c151395e41706972e5b532077b8a2b2940bd8869734db"
 
 
 def _color_dist(a, b):
