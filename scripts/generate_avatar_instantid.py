@@ -92,7 +92,7 @@ def crop_to_shoulders(path: Path, margin_fraction: float = 0.12) -> None:
     bbox = ImageChops.difference(im, bg).getbbox()
     if not bbox:
         return
-    left, top, right, bottom = bbox
+    left, top, right, bottom = bbox  # right/bottom are exclusive (PIL bbox convention)
     content_height = bottom - top
     fallback_bottom = min(top + int(content_height * 0.72), im.height)
 
@@ -100,7 +100,7 @@ def crop_to_shoulders(path: Path, margin_fraction: float = 0.12) -> None:
     non_white = np.any(arr < 250, axis=2)
     col_idx = np.arange(arr.shape[1])
     widths = np.zeros(arr.shape[0], dtype=int)
-    for y in range(top, bottom + 1):
+    for y in range(top, bottom):
         xs = col_idx[non_white[y]]
         if xs.size:
             widths[y] = xs[-1] - xs[0]
@@ -114,7 +114,7 @@ def crop_to_shoulders(path: Path, margin_fraction: float = 0.12) -> None:
     new_bottom = fallback_bottom
     if search_start < search_end:
         neck_y = search_start + int(np.argmin(widths[search_start:search_end]))
-        below = widths[neck_y : bottom + 1]
+        below = widths[neck_y:bottom]
         shoulder_width = below.max() if below.size else 0
         if shoulder_width > widths[neck_y]:
             threshold = widths[neck_y] + (shoulder_width - widths[neck_y]) * 0.85
