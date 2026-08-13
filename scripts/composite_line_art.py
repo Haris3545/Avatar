@@ -507,14 +507,14 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray):
     out_im = draw_smooth_strokes(out_im, silhouette_contours, width=4)
     out_im = draw_smooth_strokes(out_im, hair_clothes_outer, width=4)
 
-    return np.array(out_im), foreground, gray
+    return np.array(out_im), foreground, gray, hair_clothes
 
 
 def composite_line_art(photo_path: Path, out_path: Path):
     print("Segmenting photo...")
     im = Image.open(photo_path).convert("RGB")
     cat_mask = segment(im)
-    out, foreground, gray = _base_layers(im, cat_mask)
+    out, foreground, gray, hair_clothes = _base_layers(im, cat_mask)
 
     skin_mask = (cat_mask == FACE_SKIN) | (cat_mask == BODY_SKIN)
     fg_vals = gray[foreground]
@@ -589,7 +589,7 @@ def structure_composite(photo_path: Path, out_path: Path):
     print("Segmenting photo...")
     im = Image.open(photo_path).convert("RGB")
     cat_mask = segment(im)
-    out, foreground, gray = _base_layers(im, cat_mask)
+    out, foreground, gray, hair_clothes = _base_layers(im, cat_mask)
 
     print("Detecting face landmarks for face structure...")
     landmarks = get_face_landmarks(im)
@@ -607,22 +607,74 @@ def structure_composite(photo_path: Path, out_path: Path):
     print(f"Saved to {out_path}")
 
 
+def scaffold_composite(photo_path: Path, out_path: Path, mask_path: Path):
+    """A third mode: the classical pipeline's own outer silhouette/hair
+    shape and jaw/cheek contour, locked in as final art, with a companion
+    inpaint mask marking the interior face region as editable. Meant for
+    scripts/generate_avatar_instantid.py's --mask, so the generation model
+    can only draw within that masked region (eyes, nose, mouth, stubble
+    texture) while every pixel outside it -- the actual face/hair shape --
+    stays exactly as measured, not subject to a ControlNet's best guess.
+
+    Soft conditioning (a ControlNet, at any strength) only ever nudges the
+    output; it can't guarantee the shape survives, which is exactly what
+    happened testing composite_line_art.py's --structure output as
+    --control-image at low and high strength alike. A hard mask is the
+    only way to actually guarantee it."""
+    print("Segmenting photo...")
+    im = Image.open(photo_path).convert("RGB")
+    cat_mask = segment(im)
+    out, foreground, gray, hair_clothes = _base_layers(im, cat_mask)
+
+    print("Detecting face landmarks for jaw line and inpaint mask...")
+    landmarks = get_face_landmarks(im)
+    mask = np.zeros(gray.shape, dtype=bool)
+    if landmarks is not None:
+        h, w = gray.shape
+        out_im = Image.fromarray(out)
+        for jaw_segment in refine_jaw_to_edges(landmarks, gray, w, h):
+            out_im = draw_open_smooth_stroke(out_im, jaw_segment, width=3)
+        out = np.array(out_im)
+
+        # The editable region is the face oval's interior (the whole loop
+        # this time, forehead included, not just the jaw arc) minus
+        # whatever's already covered by the locked hair/clothes fill --
+        # only the visible skin needs to be editable, not hair-covered
+        # forehead that's already accounted for.
+        order = _ordered_face_oval_indices()
+        oval_pts = [(landmarks[i].x * w, landmarks[i].y * h) for i in order]
+        oval_im = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(oval_im).polygon(oval_pts, fill=255)
+        oval_mask = np.array(oval_im) > 0
+        mask = oval_mask & ~hair_clothes
+    else:
+        print("No face detected, mask will be empty (nothing to inpaint)")
+
+    Image.fromarray(out).save(out_path)
+    Image.fromarray((mask * 255).astype(np.uint8)).save(mask_path)
+    print(f"Saved scaffold to {out_path}, mask to {mask_path}")
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(
-            "Usage: composite_line_art.py path/to/photo.jpg [out.png] [--structure]"
+            "Usage: composite_line_art.py path/to/photo.jpg [out.png] [--structure|--scaffold]"
         )
 
     structure_mode = "--structure" in sys.argv
-    args = [a for a in sys.argv[1:] if a != "--structure"]
+    scaffold_mode = "--scaffold" in sys.argv
+    args = [a for a in sys.argv[1:] if a not in ("--structure", "--scaffold")]
 
     photo_path = Path(args[0])
-    default_suffix = "_structure" if structure_mode else "_lineart"
+    default_suffix = "_structure" if structure_mode else "_scaffold" if scaffold_mode else "_lineart"
     out_path = Path(args[1]) if len(args) > 1 else photo_path.with_name(
         photo_path.stem + default_suffix + ".png"
     )
 
-    if structure_mode:
+    if scaffold_mode:
+        mask_path = out_path.with_name(out_path.stem + "_mask.png")
+        scaffold_composite(photo_path, out_path, mask_path)
+    elif structure_mode:
         structure_composite(photo_path, out_path)
     else:
         composite_line_art(photo_path, out_path)
