@@ -175,18 +175,20 @@ def _ordered_face_oval_indices():
 
 
 def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radius: float = 20, edge_threshold: float = 10, break_factor: float = 2.2):
-    """Anchor the jaw/chin outline to real photo evidence instead of a
+    """Anchor the jaw/cheek outline to real photo evidence instead of a
     generic predicted position. The face landmarker's face-oval points are
-    a reasonable prior for roughly where the jaw is, but they're a
+    a reasonable prior for roughly where the face edge is, but they're a
     geometric prediction, not a measurement -- for likeness we want the
-    actual tonal edge between face and neck/background wherever the photo
-    has one. For each face-oval point below eye level (the jaw/chin arc,
-    not the forehead/temples which are usually hair-covered anyway),
-    search a short distance along the local outward normal for the
-    strongest brightness gradient in the real photo and snap to it; where
-    there's genuinely no measurable edge nearby (flat lighting, low
-    contrast), keep the landmark position rather than inventing an edge
-    that isn't there.
+    actual tonal edge between face and neck/background/hair wherever the
+    photo has one. Covers the whole face oval below the very top of the
+    forehead (not just the chin), since cheek and temple contour carry
+    likeness too, not only the chin -- restricting this to a narrow chin
+    arc lost the sides of the face entirely. For each point, search a
+    short distance along the local outward normal for the strongest
+    brightness gradient in the real photo and snap to it; where there's
+    genuinely no measurable edge nearby (flat lighting, low contrast, or
+    hair-covered), keep the landmark position rather than inventing an
+    edge that isn't there.
 
     Simplification is left to the caller's drawing step (a light spline
     smoothing pass), not done here, so the actual measured positions stay
@@ -212,8 +214,13 @@ def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radi
     top_idx = int(np.argmin(pts[:, 1]))
     pts = np.roll(pts, -top_idx, axis=0)
 
+    # Exclude only the very peak of the forehead -- everywhere else on the
+    # face oval (temples, cheeks, jaw, chin) gets the same real-evidence
+    # treatment. The forehead peak is skipped because it's almost always
+    # hair-covered and its "edge" would just be hair/skin, redundant with
+    # the hair silhouette drawn separately.
     y_min, y_max = pts[:, 1].min(), pts[:, 1].max()
-    jaw_cutoff = y_min + (y_max - y_min) * 0.55
+    jaw_cutoff = y_min + (y_max - y_min) * 0.06
     jaw_indices = np.where(pts[:, 1] >= jaw_cutoff)[0]
     if jaw_indices.size < 4:
         return []
