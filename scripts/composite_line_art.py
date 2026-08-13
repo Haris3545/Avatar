@@ -174,7 +174,7 @@ def _ordered_face_oval_indices():
     return order
 
 
-def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radius: float = 20, edge_threshold: float = 10):
+def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radius: float = 20, edge_threshold: float = 10, break_factor: float = 2.2):
     """Anchor the jaw/chin outline to real photo evidence instead of a
     generic predicted position. The face landmarker's face-oval points are
     a reasonable prior for roughly where the jaw is, but they're a
@@ -188,15 +188,23 @@ def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radi
     contrast), keep the landmark position rather than inventing an edge
     that isn't there.
 
-    Returns an ordered (not closed) point sequence for just the jaw arc, or
-    None if the face is too small/landmarks are missing."""
+    Snapped points get a light 3-point smoothing pass to simplify the shape
+    (remove single-point jaggedness) without erasing what it actually
+    measured. Where two neighboring points still end up unnaturally far
+    apart after that -- one snapped to a real edge, its neighbor didn't --
+    forcing a line between them would draw a connection that isn't really
+    there, so the sequence is split at that gap instead of joined.
+
+    Returns a list of ordered (not closed) point-sequence segments, since
+    the real jaw evidence may not form one continuous arc. Empty list if
+    the face is too small/landmarks are missing."""
     from scipy.ndimage import map_coordinates
 
     order = _ordered_face_oval_indices()
     pts = np.array([[landmarks[i].x * w, landmarks[i].y * h] for i in order])
     n = len(pts)
     if n < 8:
-        return None
+        return []
 
     # Rotate so the topmost (forehead) point is first, so the jaw arc (the
     # lower, higher-y points) forms one contiguous run without wrapping
@@ -208,7 +216,7 @@ def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radi
     jaw_cutoff = y_min + (y_max - y_min) * 0.55
     jaw_indices = np.where(pts[:, 1] >= jaw_cutoff)[0]
     if jaw_indices.size < 4:
-        return None
+        return []
     jaw_pts = pts[jaw_indices.min() : jaw_indices.max() + 1]
 
     centroid = pts.mean(axis=0)
@@ -238,7 +246,30 @@ def refine_jaw_to_edges(landmarks, gray: np.ndarray, w: int, h: int, search_radi
             continue  # no reliable edge here -- keep the landmark position
         refined[i] = (sample_pts[best] + sample_pts[best + 1]) / 2
 
-    return refined
+    # Simplify: smooth out single-point jaggedness from independent
+    # per-point snapping, rather than drawing every measurement wiggle.
+    if m >= 3:
+        refined[1:-1] = (refined[:-2] + refined[1:-1] + refined[2:]) / 3
+
+    # Split wherever the connection between neighbors is unnaturally long
+    # relative to the landmarks' own spacing, instead of drawing a straight
+    # jump across a gap that isn't really part of the same measured edge.
+    landmark_spacing = np.linalg.norm(np.diff(jaw_pts, axis=0), axis=1)
+    median_spacing = np.median(landmark_spacing) if landmark_spacing.size else 1.0
+    step_dists = np.linalg.norm(np.diff(refined, axis=0), axis=1)
+    break_at = set(np.where(step_dists > median_spacing * break_factor)[0].tolist())
+
+    segments = []
+    start = 0
+    for i in range(m - 1):
+        if i in break_at:
+            if i + 1 - start >= 2:
+                segments.append(refined[start : i + 1])
+            start = i + 1
+    if m - start >= 2:
+        segments.append(refined[start:])
+
+    return segments
 
 
 def draw_open_smooth_stroke(canvas: Image.Image, points, width: int = 3, supersample: int = 4) -> Image.Image:
@@ -252,7 +283,7 @@ def draw_open_smooth_stroke(canvas: Image.Image, points, width: int = 3, supersa
 
     x, y = points[:, 0], points[:, 1]
     try:
-        tck, _ = splprep([x, y], s=len(x) * 0.5, per=False)
+        tck, _ = splprep([x, y], s=len(x) * 1.0, per=False)
         u = np.linspace(0, 1, max(len(x) * 4, 50))
         xs, ys = splev(u, tck)
         smoothed = np.stack([xs, ys], axis=1)
@@ -433,8 +464,8 @@ def composite_line_art(photo_path: Path, out_path: Path):
     if landmarks is not None:
         h, w = gray.shape
         out_im = Image.fromarray(out)
-        jaw = refine_jaw_to_edges(landmarks, gray, w, h)
-        out_im = draw_open_smooth_stroke(out_im, jaw, width=3)
+        for jaw_segment in refine_jaw_to_edges(landmarks, gray, w, h):
+            out_im = draw_open_smooth_stroke(out_im, jaw_segment, width=3)
         out = draw_dot_eyes(np.array(out_im), landmarks, w, h)
     else:
         print("No face detected, skipping dot-eye replacement")
@@ -492,8 +523,8 @@ def structure_composite(photo_path: Path, out_path: Path):
         h, w = gray.shape
         out = draw_face_structure_lines(out, landmarks, w, h)
         out_im = Image.fromarray(out)
-        jaw = refine_jaw_to_edges(landmarks, gray, w, h)
-        out_im = draw_open_smooth_stroke(out_im, jaw, width=3)
+        for jaw_segment in refine_jaw_to_edges(landmarks, gray, w, h):
+            out_im = draw_open_smooth_stroke(out_im, jaw_segment, width=3)
         out = draw_dot_eyes(np.array(out_im), landmarks, w, h)
     else:
         print("No face detected, skipping face structure lines")
