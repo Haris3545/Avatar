@@ -460,7 +460,58 @@ def draw_smooth_fills(canvas: Image.Image, contours, fill=(0, 0, 0), supersample
     return canvas
 
 
-def _base_layers(im: Image.Image, cat_mask: np.ndarray):
+def reveal_ears(hair_clothes: np.ndarray, cat_mask: np.ndarray, im: Image.Image, landmarks, w: int, h: int, search_frac: float = 0.35) -> np.ndarray:
+    """A shadowed ear against dark hair can get misclassified as hair
+    entirely by the segmenter (similar tones, similar local texture),
+    swallowing the ear into the solid hair fill with no indication it was
+    ever there. Within a small window near each ear (anchored at the face
+    oval's widest point, the landmark nearest each ear -- MediaPipe's face
+    mesh has no ear landmarks of its own), reclassify hair-labeled pixels
+    that actually match this photo's real skin tone back to skin, carving
+    the ear back out instead of leaving it guessed away."""
+    rgb = np.array(im.convert("RGB")).astype(np.float64)
+    skin_mask = (cat_mask == FACE_SKIN) | (cat_mask == BODY_SKIN)
+    if not skin_mask.any():
+        return hair_clothes
+
+    # Skin tone varies with lighting (shadow side vs lit side), so match
+    # against the full observed range, not just a single mean color --
+    # an ear in shadow needs to compare against shadowed skin, not the
+    # brightest lit skin elsewhere on the face.
+    skin_pixels = rgb[skin_mask]
+    skin_mean = skin_pixels.mean(axis=0)
+    skin_cov = np.cov(skin_pixels.T) + np.eye(3) * 1e-3
+    skin_cov_inv = np.linalg.inv(skin_cov)
+
+    oval_order = _ordered_face_oval_indices()
+    oval_pts = np.array([[landmarks[i].x * w, landmarks[i].y * h] for i in oval_order])
+    face_width = oval_pts[:, 0].max() - oval_pts[:, 0].min()
+    radius = max(int(face_width * search_frac), 8)
+
+    corrected = hair_clothes.copy()
+    for lid in (234, 454):
+        lm = landmarks[lid]
+        cx, cy = int(lm.x * w), int(lm.y * h)
+        y0, y1 = max(cy - radius, 0), min(cy + radius, h)
+        x0, x1 = max(cx - radius, 0), min(cx + radius, w)
+        if y1 <= y0 or x1 <= x0:
+            continue
+
+        window = rgb[y0:y1, x0:x1] - skin_mean
+        # Mahalanobis distance to the observed skin-tone distribution --
+        # accounts for skin's actual brightness/hue spread instead of a
+        # fixed radius in raw RGB, which would either miss shadowed skin
+        # or false-positive on warm-toned hair.
+        dist = np.sqrt(np.einsum("...i,ij,...j->...", window, skin_cov_inv, window))
+        skin_like = dist < 5.0
+
+        hair_window = hair_clothes[y0:y1, x0:x1]
+        corrected[y0:y1, x0:x1][hair_window & skin_like] = False
+
+    return corrected
+
+
+def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     """Shared groundwork for both composite modes: a white canvas with flat
     black hair/clothes fills and a thick rounded outer silhouette outline,
     plus the raw foreground mask for callers that need it. This part is
@@ -478,6 +529,9 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray):
     # rounding is actually circular, not the diamond shape a default
     # cross-shaped structure would give.
     hair_clothes = (cat_mask == HAIR) | (cat_mask == CLOTHES) | (cat_mask == OTHER)
+    if landmarks is not None:
+        h, w = gray.shape
+        hair_clothes = reveal_ears(hair_clothes, cat_mask, im, landmarks, w, h)
     kernel = disk(4)
     hair_clothes = ndimage.binary_closing(hair_clothes, structure=kernel)
     hair_clothes = ndimage.binary_opening(hair_clothes, structure=kernel)
@@ -514,7 +568,9 @@ def composite_line_art(photo_path: Path, out_path: Path):
     print("Segmenting photo...")
     im = Image.open(photo_path).convert("RGB")
     cat_mask = segment(im)
-    out, foreground, gray, hair_clothes = _base_layers(im, cat_mask)
+    print("Detecting face landmarks...")
+    landmarks = get_face_landmarks(im)
+    out, foreground, gray, hair_clothes = _base_layers(im, cat_mask, landmarks)
 
     skin_mask = (cat_mask == FACE_SKIN) | (cat_mask == BODY_SKIN)
     fg_vals = gray[foreground]
@@ -533,8 +589,6 @@ def composite_line_art(photo_path: Path, out_path: Path):
         area = blob.sum()
         out[blob] = (0, 0, 0) if area >= big_blob_thresh else (60, 60, 60)
 
-    print("Detecting face landmarks for dot eyes and jaw line...")
-    landmarks = get_face_landmarks(im)
     if landmarks is not None:
         h, w = gray.shape
         out_im = Image.fromarray(out)
@@ -589,10 +643,10 @@ def structure_composite(photo_path: Path, out_path: Path):
     print("Segmenting photo...")
     im = Image.open(photo_path).convert("RGB")
     cat_mask = segment(im)
-    out, foreground, gray, hair_clothes = _base_layers(im, cat_mask)
-
     print("Detecting face landmarks for face structure...")
     landmarks = get_face_landmarks(im)
+    out, foreground, gray, hair_clothes = _base_layers(im, cat_mask, landmarks)
+
     if landmarks is not None:
         h, w = gray.shape
         out = draw_face_structure_lines(out, landmarks, w, h)
@@ -624,10 +678,10 @@ def scaffold_composite(photo_path: Path, out_path: Path, mask_path: Path):
     print("Segmenting photo...")
     im = Image.open(photo_path).convert("RGB")
     cat_mask = segment(im)
-    out, foreground, gray, hair_clothes = _base_layers(im, cat_mask)
-
     print("Detecting face landmarks for jaw line and inpaint mask...")
     landmarks = get_face_landmarks(im)
+    out, foreground, gray, hair_clothes = _base_layers(im, cat_mask, landmarks)
+
     mask = np.zeros(gray.shape, dtype=bool)
     if landmarks is not None:
         h, w = gray.shape
