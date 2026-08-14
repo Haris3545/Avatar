@@ -88,6 +88,22 @@ def filter_references(paths, want_glasses, want_beard):
     print(f"Filtered to {len(filtered)} reference(s) matching glasses={want_glasses}, beard={want_beard}")
     return filtered
 
+
+def cap_references(paths, max_references):
+    """Cap the reference set to a small, fixed-size subset instead of
+    sending every matching avatar. filter_references() already argues
+    that averaging across many examples muddies specific drawing
+    conventions -- the same reasoning applies to count, not just category:
+    even within one category (e.g. glasses+no-beard), a dozen-plus
+    examples give the model more room to average toward a generic middle
+    ground than a handful of clear, consistent exemplars would. Takes the
+    first N of the already-deterministically-sorted list, so the exact
+    same subset is sent on every run."""
+    if max_references is None or len(paths) <= max_references:
+        return paths
+    print(f"Capping references to the first {max_references} of {len(paths)} matches")
+    return paths[:max_references]
+
 STRUCTURE_PREAMBLE = (
     "The FIRST attached image is a structural line-art drawing generated directly from this "
     "exact photo's measured face geometry (jaw shape, eyebrow/eye/nose/mouth position, hairline, "
@@ -106,26 +122,6 @@ STRUCTURE_PREAMBLE = (
     "color) -- never let it override the first image's proportions. "
     "The remaining attached images are house-style reference avatars for line quality and "
     "rendering style only, not structure. "
-)
-
-REFINEMENT_PREAMBLE = (
-    "The FIRST attached image is the structural line-art reference -- authoritative for "
-    "proportions and positions (jaw width/taper, eye/nose/mouth position and shape, hairline, "
-    "glasses shape). "
-    "The SECOND attached image is your own most recent draft, which needs refinement, not a "
-    "fresh redraw. "
-    "The THIRD attached image is the original photo, included only for visual detail the "
-    "structural image doesn't capture (skin tone, real hair color, glasses color) -- never let "
-    "it override the structural image's proportions. "
-    "The remaining attached images are house-style reference avatars for line quality and "
-    "rendering style only, not structure. "
-    "Compare your previous draft against the structural reference and correct any proportions "
-    "that drifted from it -- especially jaw shape/width/taper, eye shape and spacing, nose "
-    "shape, and ear position/shape, all of which are what make an avatar actually recognizable "
-    "as this specific person. Keep everything about the previous draft that already matches "
-    "well, and keep the exact same house illustration style (thick bold uniform linework, flat "
-    "white skin with no shading, flat grey clothing). This is a targeted correction pass on "
-    "your own prior output, not a fresh interpretation of the photo -- do not start over. "
 )
 
 DEFAULT_PROMPT = (
@@ -191,6 +187,43 @@ DEFAULT_PROMPT = (
     "structural reference image, which is already cropped this way."
 )
 
+# A second, independent Gemini call that scores one generated draft against
+# a short checklist of the failure modes actually observed in testing
+# (thin/generic lines instead of bold, wrong collar shape, stray garbled
+# marks) -- catches a bad sample automatically instead of only by eye.
+# Deliberately narrow (4 checks) rather than re-litigating the whole
+# prompt: this is a pass/fail gate on known failure modes, not a full
+# style review.
+QA_PROMPT = (
+    "You are checking a generated avatar illustration against a strict house style checklist. "
+    "For each numbered criterion below, answer only YES or NO, one per line, in the exact format "
+    "'N: YES' or 'N: NO' with no other text before or after.\n"
+    "1. Every line in the image is a thick, bold, confident stroke of one consistent heavy "
+    "weight -- not thin, hairline, or generic-flat-vector-icon style.\n"
+    "2. The face and neck are bare flat white, with zero shading, tint, gradient, or grey tone "
+    "anywhere on the skin.\n"
+    "3. The clothing shows a proper button-up shirt collar with two open collar points meeting "
+    "near the top button -- not a polo or crew-neck collar.\n"
+    "4. There are no garbled, duplicated, blurred, or nonsensical marks anywhere on the face -- "
+    "every line reads as a clean, intentional stroke.\n"
+)
+
+
+def qa_check(image, client, model):
+    """Returns (passed: bool, checks: dict[int, bool], raw_text: str)."""
+    response = client.models.generate_content(model=model, contents=[QA_PROMPT, image])
+    text = "".join(part.text for part in response.candidates[0].content.parts if getattr(part, "text", None))
+    checks = {}
+    for line in text.strip().splitlines():
+        if ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        key = key.strip()
+        if key.isdigit():
+            checks[int(key)] = val.strip().upper().startswith("Y")
+    passed = bool(checks) and all(checks.values())
+    return passed, checks, text
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -243,21 +276,59 @@ def main():
         "original behavior) -- useful for comparing against the structure-anchored result.",
     )
     parser.add_argument(
-        "--iterations",
+        "--samples",
         type=int,
         default=1,
-        help="Run N refinement passes instead of one generation: pass 1 generates from the "
-        "photo/structure as normal, each subsequent pass feeds Gemini its own previous output "
-        "plus the structure reference again and asks for a targeted correction, not a fresh "
-        "redraw. Every pass is saved separately (<out>_iter1.png, _iter2.png, ...) so you can "
-        "compare and pick the best one rather than trusting the last pass is automatically "
-        "best -- there's no reliable auto-stop-when-converged check for line art, where a single "
-        "redrawn line can move many pixels without the drawing meaningfully changing.",
+        help="Generate N independent drafts instead of one, each a fresh generation from the "
+        "same photo/structure/references (not fed from each other -- feeding a draft back in as "
+        "a 'refine this' step was tried and made quality worse each pass, since Gemini has no "
+        "strong anchor pulling a stochastic re-interpretation back toward correctness). "
+        "Independent samples don't compound errors the way sequential refinement did. Every "
+        "sample is saved separately (<out>_sample1.png, _sample2.png, ...).",
+    )
+    parser.add_argument(
+        "--max-references",
+        type=int,
+        default=6,
+        help="Cap the (category-filtered) reference set to the first N avatars instead of "
+        "sending every match. A dozen-plus in-context examples give the model more room to "
+        "average toward a generic middle ground than a handful of consistent exemplars do -- "
+        "same reasoning filter_references() already applies to category, applied to count too. "
+        "Pass 0 to disable capping and send the full filtered set.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Fix the generation seed for reproducibility while testing prompt changes. Image "
+        "models don't always honor this reliably -- treat it as a best-effort nudge toward "
+        "determinism, not a guarantee. Using this with --samples > 1 will likely produce "
+        "identical or near-identical outputs, defeating the point of independent sampling.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Sampling temperature, if supported by the model. Lower (e.g. 0.4) reduces "
+        "run-to-run style variance (line weight, collar shape) at the cost of less creative "
+        "range; unset uses the model's own default.",
+    )
+    parser.add_argument(
+        "--qa",
+        action="store_true",
+        help="Run a second Gemini call on each generated sample checking it against known "
+        "failure modes (thin lines, wrong collar shape, garbled marks) and report pass/fail "
+        "per sample. Doubles the API calls; off by default.",
     )
     args = parser.parse_args()
 
-    if args.iterations < 1:
-        sys.exit("--iterations must be at least 1")
+    if args.samples < 1:
+        sys.exit("--samples must be at least 1")
+    if args.seed is not None and args.samples > 1:
+        print(
+            "Warning: --seed with --samples > 1 will likely produce identical/near-identical "
+            "outputs -- consider dropping one or the other."
+        )
 
     if args.glasses and args.no_glasses:
         sys.exit("--glasses and --no-glasses are mutually exclusive")
@@ -276,6 +347,7 @@ def main():
     want_glasses = True if args.glasses else (False if args.no_glasses else None)
     want_beard = True if args.beard else (False if args.no_beard else None)
     reference_paths = filter_references(reference_paths, want_glasses, want_beard)
+    reference_paths = cap_references(reference_paths, args.max_references if args.max_references > 0 else None)
 
     import os
 
@@ -284,9 +356,13 @@ def main():
         sys.exit("Set GEMINI_API_KEY first (get one at https://aistudio.google.com/apikey)")
 
     from google import genai
+    from google.genai import types
     from PIL import Image
 
     client = genai.Client(api_key=api_key)
+    config = None
+    if args.seed is not None or args.temperature is not None:
+        config = types.GenerateContentConfig(seed=args.seed, temperature=args.temperature)
 
     structure_path = None
     if args.structure_image:
@@ -328,34 +404,38 @@ def main():
     for p in reference_paths:
         contents.append(Image.open(p))
 
-    print(f"Generating with {args.model} (pass 1/{args.iterations})...")
-    response = client.models.generate_content(model=args.model, contents=contents)
-    current = extract_image(response)
+    results = []  # (path, passed_or_None, checks_or_None)
+    for i in range(1, args.samples + 1):
+        print(f"Generating with {args.model} (sample {i}/{args.samples})...")
+        response = client.models.generate_content(model=args.model, contents=contents, config=config)
+        image = extract_image(response)
 
-    iter_path = out_path.with_name(f"{out_path.stem}_iter1{out_path.suffix}")
-    current.save(iter_path)
-    print(f"Saved pass 1 to {iter_path}")
+        if args.samples == 1:
+            sample_path = out_path
+        else:
+            sample_path = out_path.with_name(f"{out_path.stem}_sample{i}{out_path.suffix}")
+        image.save(sample_path)
+        print(f"Saved to {sample_path}")
 
-    for i in range(2, args.iterations + 1):
-        print(f"Refining with {args.model} (pass {i}/{args.iterations})...")
-        refine_contents = [REFINEMENT_PREAMBLE + args.prompt]
-        if structure_path:
-            refine_contents.append(Image.open(structure_path))
-        refine_contents.append(current)
-        refine_contents.append(Image.open(photo_path))
-        for p in reference_paths:
-            refine_contents.append(Image.open(p))
+        passed, checks, raw = (None, None, None)
+        if args.qa:
+            print(f"  Running QA check on sample {i}...")
+            passed, checks, raw = qa_check(image, client, args.model)
+            status = "PASS" if passed else "FAIL"
+            print(f"  QA {status}: {checks}")
+        results.append((sample_path, passed, checks))
 
-        response = client.models.generate_content(model=args.model, contents=refine_contents)
-        current = extract_image(response)
-
-        iter_path = out_path.with_name(f"{out_path.stem}_iter{i}{out_path.suffix}")
-        current.save(iter_path)
-        print(f"Saved pass {i} to {iter_path}")
-
-    current.save(out_path)
-
-    print(f"Saved to {args.out}")
+    if args.samples > 1:
+        print("\nSummary:")
+        for path, passed, checks in results:
+            tag = "" if passed is None else (" [QA PASS]" if passed else f" [QA FAIL {checks}]")
+            print(f"  {path}{tag}")
+        if args.qa:
+            passing = [p for p, passed, _ in results if passed]
+            if passing:
+                print(f"\n{len(passing)}/{args.samples} sample(s) passed QA. Recommended: {passing[0]}")
+            else:
+                print("\nNo samples passed QA -- review all of them manually, none is auto-recommended.")
 
 
 if __name__ == "__main__":
