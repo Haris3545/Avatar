@@ -51,11 +51,11 @@ def main():
     parser.add_argument(
         "--style-denoise",
         type=float,
-        default=0.6,
-        help="How much the InstantID merge step corrects Gemini's structure/identity, 0-1. "
-        "Lower keeps more of Gemini's actual rendering (style) but also more of its structural "
-        "drift; higher corrects harder but erases more of Gemini's contribution. Untested -- "
-        "expect to need a few runs at different values to find what works.",
+        default=0.85,
+        help="How much the InstantID merge step corrects Gemini's structure/identity and "
+        "repaints over its flaws (e.g. soft grey face shading), 0-1. Lower keeps more of "
+        "Gemini's actual rendering but also more of those flaws; higher gives the sampler more "
+        "room to fully overwrite them while still using Gemini's output as a starting point.",
     )
     parser.add_argument(
         "--force",

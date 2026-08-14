@@ -234,11 +234,15 @@ def main():
     parser.add_argument(
         "--style-denoise",
         type=float,
-        default=0.6,
+        default=0.85,
         help="Denoise strength for the masked region when --style-image is given, 0-1. Lower "
-        "keeps more of style_image's actual rendering (style) but also more of its structural "
-        "drift; higher corrects structure/identity harder but erases more of style_image's "
-        "contribution. Needs tuning per use -- no proven default yet.",
+        "keeps more of style_image's actual rendering (style) but also more of its flaws (e.g. "
+        "Gemini's tendency to render soft grey shading on the face, which the flat-style prompt "
+        "then has to fight against instead of simply overwriting); higher gives the sampler more "
+        "room to fully repaint over that while still following style_image's rough tone/detail "
+        "distribution as a starting point rather than blank canvas. Now that style_image is "
+        "aligned to the scaffold's coordinate frame before this step, higher values no longer "
+        "risk the ghosting they used to when the two were misaligned.",
     )
     parser.add_argument("--out", default="avatar_out_iid.png", help="Where to save the result")
     parser.add_argument("--seed", type=int, default=42)
@@ -289,6 +293,7 @@ def main():
         "no shading device of any kind -- no halftone, no cross-hatching, no stipple, no gradient, "
         "anywhere including beard, jaw, or hair, only flat solid fills or bare white, "
         "at most three or four flat tones total in the entire image, never more, never a texture standing in for a tone, "
+        "skin is pure flat white with absolutely no grey tone, no shading, and no gradient anywhere on the face or neck, "
         "clothing rendered as one flat solid black shape with no pattern, warm natural smile, "
         "graphic vector illustration, no photorealism, centered head and shoulders portrait crop",
     )
@@ -296,6 +301,9 @@ def main():
         "--negative-prompt",
         default="halftone dots on face, halftone dots on skin, stipple texture on face, "
         "dot pattern shading, dot texture skin, pointillism, dotted shading, noisy skin texture, "
+        "smooth gradient shading on face, soft shadow on cheeks, soft shadow on forehead, "
+        "grey tone on skin, grey shading on face, airbrushed shading, soft blended shadow, "
+        "contoured shading, 3D shaded face, rendered lighting on skin, "
         "individual hair strands, visible individual stubble hairs, fine stubble detail, "
         "realistic beard texture, textured beard, scattered facial hair marks, "
         "photo, photorealistic, color, colour, coloured, tinted, gradient background, "
