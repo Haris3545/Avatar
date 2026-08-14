@@ -1216,10 +1216,15 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # depth running about 8% deeper than this template's amplitude was
     # producing -- template values updated from that trace, plus a small
     # depth boost to match.
+    # A third round (annotated with sample points against the photo
+    # directly, not a hand trace) showed a noticeably boxier profile than
+    # this: steep near-vertical legs starting close to the corners, and a
+    # wide flat shelf across most of the width rather than a single
+    # tapering peak -- widened the plateau and steepened the leg rise.
     NOSE_DEPTH_TEMPLATE = [
-        0.00, 0.36, 0.48, 0.56, 0.60, 0.60, 0.60, 0.60, 0.70, 0.76,
-        0.82, 0.91, 0.96, 0.99, 1.00, 0.97, 0.91, 0.79, 0.71, 0.66,
-        0.61, 0.56, 0.55, 0.49, 0.00,
+        0.00, 0.55, 0.80, 0.88, 0.92, 0.94, 0.95, 0.96, 0.97, 0.98,
+        0.99, 1.00, 1.00, 1.00, 0.99, 0.98, 0.97, 0.96, 0.95, 0.94,
+        0.92, 0.88, 0.80, 0.55, 0.00,
     ]
     left = np.array([landmarks[49].x * w, landmarks[49].y * h + nose_shift])
     right = np.array([landmarks[279].x * w, landmarks[279].y * h + nose_shift])
@@ -1285,7 +1290,12 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     t = (raw_pts[:, 0] - corner_l[0]) / (corner_r[0] - corner_l[0])
     trend = corner_l[1] * (1 - t) + corner_r[1] * t
     leveled_y = raw_pts[:, 1] - trend + avg_corner_y
-    upts = np.stack([raw_pts[:, 0], leveled_y + mouth_shift], axis=1)
+    # The same third round's annotation also showed visible waviness along
+    # the seam (natural lip texture) that the leveled curve, drawn through
+    # only 11 points and splined exactly, was smoothing away -- a light
+    # synthetic ripple restores that texture without needing more landmarks.
+    ripple = np.sin(t * np.pi * 3) * (eye_span * 0.012)
+    upts = np.stack([raw_pts[:, 0], leveled_y + ripple + mouth_shift], axis=1)
     utck, _ = splprep([upts[:, 0], upts[:, 1]], s=0, k=3)
     uxs, uys = splev(np.linspace(0, 1, 40), utck)
     img = draw_smooth_open_stroke(img, list(zip(uxs, uys)), width=line_width)
