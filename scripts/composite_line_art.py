@@ -473,11 +473,15 @@ def jag_fringe(contour: np.ndarray, n_teeth: int = 6, depth_frac: float = 0.035)
 
 
 def draw_hair_strands(canvas: Image.Image, hair_outer_contours, detail_width: float = DETAIL_WIDTH, n_strands: int = 3) -> Image.Image:
-    """A small number of tapered strokes rising from the crown, drawn over
-    the solid hair fill -- matches the reference avatars' hair treatment
-    (a handful of individual strands escaping the flat silhouette, each
-    tapering to a point) instead of a featureless flat black mass with
-    nothing distinguishing it as hair."""
+    """A small number of thin white shine/highlight streaks cut into the
+    solid hair fill near the fringe -- negative-space gaps, not strands
+    drawn on top. Matches the confirmed reference style: a few short white
+    cuts breaking the crown edge read as movement/shine, unlike an earlier
+    version of this that drew dark tapered strokes escaping past the
+    silhouette edge, which doesn't match. Each streak starts at the
+    fringe/crown boundary and cuts a short way *into* the fill (toward
+    increasing y, since that boundary is the hair's top edge), not beyond
+    it."""
     if not hair_outer_contours:
         return canvas
 
@@ -498,11 +502,11 @@ def draw_hair_strands(canvas: Image.Image, hair_outer_contours, detail_width: fl
     for idx in idxs:
         bx, by = near_top[idx]
         dx = 1.0 if bx >= cx else -1.0
-        length = bbox_h * 0.22
+        length = bbox_h * 0.16
         base = (bx, by)
-        mid = (bx + dx * length * 0.15, by - length * 0.5)
-        tip = (bx + dx * length * 0.35, by - length)
-        canvas = draw_pointed_stroke(canvas, [base, mid, tip], base_width=detail_width * 0.8)
+        mid = (bx + dx * length * 0.12, by + length * 0.5)
+        tip = (bx + dx * length * 0.25, by + length * 0.9)
+        canvas = draw_pointed_stroke(canvas, [base, mid, tip], base_width=detail_width * 0.8, fill=(255, 255, 255))
 
     return canvas
 
@@ -558,7 +562,19 @@ def draw_collar_hint(canvas: Image.Image, clothes_outer, detail_width: float) ->
         norm = max((dx**2 + dy**2) ** 0.5, 1)
         pts.append((px + dx / norm * inset, py + dy / norm * inset))
 
-    return draw_smooth_open_stroke(canvas, pts, width=max(1, detail_width - 2))
+    canvas = draw_smooth_open_stroke(canvas, pts, width=max(1, detail_width - 2))
+    return draw_shirt_buttons(canvas, contour, top_y, bbox_h, cx, detail_width)
+
+
+def draw_shirt_buttons(canvas: Image.Image, clothes_contour, top_y: float, bbox_h: float, cx: float, detail_width: float) -> Image.Image:
+    """A couple of small solid button dots down the vertical center of the
+    clothing, below the collar -- the reference style shows a clean
+    collar with visible buttons, not a featureless flat shape."""
+    for frac in (0.22, 0.34):
+        by = top_y + bbox_h * frac
+        r = max(detail_width * 0.35, 1)
+        canvas = draw_smooth_dot(canvas, cx, by, r)
+    return canvas
 
 
 def draw_clothes_shading(canvas: Image.Image, clothes_only: np.ndarray, gray: np.ndarray) -> Image.Image:
@@ -910,8 +926,13 @@ def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.nd
         glasses_outer, glasses_holes = smooth_contours(
             glasses_closed, min_area_frac=0.0006, include_holes=True, smoothing=0.4
         )
-        out_im = draw_smooth_strokes(out_im, glasses_outer, width=detail_width)
-        out_im = draw_smooth_strokes(out_im, glasses_holes, width=detail_width)
+        # Bolder than the general detail_width (everything else is thin
+        # in this style, but the reference glasses frame is consistently
+        # drawn thick/confident, not at the same weight as the eyebrows
+        # or nose).
+        glasses_width = detail_width + 2
+        out_im = draw_smooth_strokes(out_im, glasses_outer, width=glasses_width)
+        out_im = draw_smooth_strokes(out_im, glasses_holes, width=glasses_width)
         # No sparkle/reflection tick flourish here (a prior version added
         # one): the confirmed target reference style is a sparse, minimal
         # sketch, and extra flourish marks cut against "as few strokes as
@@ -1043,22 +1064,32 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     nose_bottom_idx = [49, 129, 98, 2, 327, 358, 279]
     pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in nose_bottom_idx])
     tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
-    # Reference avatars mark the nose with a small comma-like mark near the
-    # tip -- often barely visible at all -- not a line spanning the full
-    # nostril-to-nostril width. Sample only a narrow middle sliver of the
-    # same real spline (rather than a separately-guessed shape) to shrink
-    # it down to that size while keeping its actual curvature. Narrowed
-    # progressively (was 0.32-0.68, then 0.4-0.6) to match how minimal the
-    # reference nose marks actually are.
-    xs, ys = splev(np.linspace(0.44, 0.56, 10), tck)
-    img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 2))
+    # Reference avatars mark the nose with a small two-nostril "gull-wing"
+    # mark -- clearly present, not reduced to invisibility. An earlier,
+    # more aggressively-shrunk version (0.44-0.56) overshot into "barely
+    # there"; this brings it back to a real, visible shape while still
+    # sampling only the middle portion (not the full nostril-to-nostril
+    # width the raw landmarks span).
+    xs, ys = splev(np.linspace(0.34, 0.66, 20), tck)
+    img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
 
-    # Mouth: a simple two-line smile, not the full lip outline -- an upper
-    # curve through the real outer-lip landmarks (mouth corners to cupid's
-    # bow), and a short second line beneath it approximating the lower lip,
-    # offset from the upper curve's own midsection rather than a second set
-    # of guessed landmark indices, so it can't drift out of proportion to
-    # the mouth width/height this specific face actually measured.
+    # A short philtrum tick between nose and mouth -- the reference style
+    # includes it, and without it the area between nose and mouth reads
+    # as blank/flat. Spans from just below the drawn nose mark to the
+    # upper lip's top-center landmark.
+    nose_bottom_y = ys.max()
+    philtrum_top = (landmarks[2].x * w, nose_bottom_y + line_width)
+    philtrum_bottom = (landmarks[0].x * w, landmarks[0].y * h)
+    img = draw_smooth_open_stroke(img, [philtrum_top, philtrum_bottom], width=max(1, line_width - 1))
+
+    # Mouth: a closed smile with real structure -- an upper curve through
+    # the real outer-lip landmarks (mouth corners to cupid's bow), plus a
+    # shorter lower-lip line beneath it, offset from the upper curve's own
+    # midsection rather than a second set of guessed landmark indices, so
+    # it can't drift out of proportion to the mouth width/height this
+    # specific face actually measured. An earlier, overly-minimized
+    # version of this read as flat/expressionless -- these two lines are
+    # the confirmed minimum for the mouth to still read as a smile.
     upper_lip_idx = [61, 40, 37, 0, 267, 270, 291]
     upts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in upper_lip_idx])
     utck, _ = splprep([upts[:, 0], upts[:, 1]], s=0, k=3)
