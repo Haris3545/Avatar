@@ -235,7 +235,9 @@ def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
         # Pupil: solid dot -- small and subtle (shrunk from an earlier,
         # noticeably larger version that read as cartoonish/doll-eyed
         # next to the confirmed reference style's small, easy-to-miss eyes).
-        pupil_r = max(eye_width * 0.08, 2)
+        # Sized up from an earlier 0.08 -- a direct correction against a
+        # real photo traced both irises noticeably larger than that.
+        pupil_r = max(eye_width * 0.12, 2)
         img = draw_smooth_dot(img, cx, cy, pupil_r)
 
         # Upper eyelid: a short, thick horizontal tick directly above the
@@ -244,7 +246,9 @@ def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
         # marks the eyelid with a small, noticeably thick stroke right
         # over the eyeball, distinct in both length and weight from the
         # thin eyebrow further above it.
-        lid_half_w = eye_width * 0.16
+        # Widened from an earlier 0.16 -- a direct correction against a
+        # real photo traced the eyelid tick noticeably wider than that.
+        lid_half_w = eye_width * 0.24
         lid_y = cy - eye_width * 0.22
         lid_w = max(eye_width * 0.18, 2)
         img = draw_smooth_open_stroke(img, [(cx - lid_half_w, lid_y), (cx + lid_half_w, lid_y)], width=lid_w)
@@ -1170,7 +1174,11 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     eye_span = np.linalg.norm(
         np.array([landmarks[263].x * w, landmarks[263].y * h]) - np.array([landmarks[33].x * w, landmarks[33].y * h])
     )
-    brow_lift = eye_span * 0.02
+    # A second round of direct correction against a real photo (this time
+    # tracing both eyebrows individually rather than eyeballing) showed the
+    # 0.02 value above still sat ~4px too low on one side while matching on
+    # the other -- split the difference rather than guess further.
+    brow_lift = eye_span * 0.04
     # Thin, only lightly tapered -- the confirmed reference style draws
     # eyebrows as a single simple curved stroke, not a thick filled shape
     # (an earlier version of this went bold/flat based on a different,
@@ -1190,7 +1198,10 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     from scipy.interpolate import splev, splprep
 
     nose_bottom_idx = [49, 129, 98, 2, 327, 358, 279]
-    pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in nose_bottom_idx])
+    # A direct correction against a real photo traced the whole nose sitting
+    # a few px too low here versus its actual position -- shift it up.
+    nose_shift = -eye_span * 0.045
+    pts = np.array([(landmarks[i].x * w, landmarks[i].y * h + nose_shift) for i in nose_bottom_idx])
     tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
     # Reference avatars mark the nose with a small two-nostril "gull-wing"
     # mark -- two visible hooks either side of a shallow center dip, not
@@ -1228,7 +1239,9 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # (not just the lower lip) sitting about 5% of eye_span too high here
     # versus its actual position -- shift both lines down by that amount
     # rather than just the landmarks' raw position.
-    mouth_shift = eye_span * 0.05
+    # A second round of direct correction traced the mouth still sitting
+    # too high after the first 0.05 fix -- moved further down.
+    mouth_shift = eye_span * 0.09
     upper_lip_idx = [61, 40, 37, 0, 267, 270, 291]
     upts = np.array([(landmarks[i].x * w, landmarks[i].y * h + mouth_shift) for i in upper_lip_idx])
     utck, _ = splprep([upts[:, 0], upts[:, 1]], s=0, k=3)
