@@ -41,7 +41,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-MODEL = "haris3545/face-to-many-patched:ce7cbd451cadd814d35a38b0fdb4feabde2eb0c37a12af5e1dcfb29a0a990093"
+MODEL = "haris3545/face-to-many-patched:212d4f36ac8fd39c2e9b32a2b7279008a1216d51fa8c7aa3eae491fb1f10e846"
 
 # vendor/TRAINING.md tracks the latest LoRA weights URL from
 # scripts/train_lora.py -- pass it via --lora-weights, it's not baked in
