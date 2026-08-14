@@ -1221,10 +1221,21 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # this: steep near-vertical legs starting close to the corners, and a
     # wide flat shelf across most of the width rather than a single
     # tapering peak -- widened the plateau and steepened the leg rise.
+    # A fourth round (exact Mark Trainer coordinates) showed that even
+    # this boxy version was still too smooth/rounded to be the real
+    # shape: nearest-point matching against it read as close (~1px mean),
+    # but that metric can't tell a smooth curve from a stepped one if
+    # both pass near the same points -- the actual traced *path*, read in
+    # sequence, is a genuine staircase: a near-vertical drop at each
+    # corner, a flat shelf, a deeper notch in the middle, not a
+    # continuous curve at all. Rebuilt directly from that path
+    # (parametrized by cumulative distance along it, not x, since the
+    # vertical segments have repeated x) instead of guessing at a smooth
+    # profile shape again.
     NOSE_DEPTH_TEMPLATE = [
-        0.00, 0.55, 0.80, 0.88, 0.92, 0.94, 0.95, 0.96, 0.97, 0.98,
-        0.99, 1.00, 1.00, 1.00, 0.99, 0.98, 0.97, 0.96, 0.95, 0.94,
-        0.92, 0.88, 0.80, 0.55, 0.00,
+        0.000, 0.190, 0.349, 0.501, 0.583, 0.719, 0.733, 0.739, 0.745, 0.767,
+        0.859, 0.966, 0.997, 0.974, 0.915, 0.820, 0.739, 0.726, 0.733, 0.712,
+        0.613, 0.479, 0.328, 0.159, 0.000,
     ]
     left = np.array([landmarks[49].x * w, landmarks[49].y * h + nose_shift])
     right = np.array([landmarks[279].x * w, landmarks[279].y * h + nose_shift])
@@ -1232,9 +1243,9 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     grid = np.linspace(0.0, 1.0, len(NOSE_DEPTH_TEMPLATE))
     xs_raw = left[0] + grid * (right[0] - left[0])
     baseline = left[1] + grid * (right[1] - left[1])
-    center_depth = (tip_y - (left[1] + right[1]) / 2) * 1.08
+    center_depth = tip_y - (left[1] + right[1]) / 2
     ys_raw = baseline + np.array(NOSE_DEPTH_TEMPLATE) * center_depth
-    tck, _ = splprep([xs_raw, ys_raw], s=len(xs_raw) * 0.1, k=3)
+    tck, _ = splprep([xs_raw, ys_raw], s=len(xs_raw) * 0.02, k=3)
     xs, ys = splev(np.linspace(0.0, 1.0, 30), tck)
     img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
 
