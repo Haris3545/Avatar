@@ -15,6 +15,14 @@ reference image and a plain-language instruction already outperformed the
 InstantID pipeline on a first try, with none of the halftone/stipple/
 gappy-glasses fighting that pipeline needed.
 
+Default references are the *entire* existing avatar set (data/avatars/),
+not a hand-picked few -- more in-context examples should generalize the
+house style more reliably than any 3 could, at the cost of a slower,
+larger, more expensive request per generation. If that trade turns out
+wrong in practice (the model dilutes/averages instead of generalizing,
+or latency/cost becomes a problem), pass --references with a smaller
+explicit list to cut it back down.
+
 Usage:
     export GEMINI_API_KEY=...   # from https://aistudio.google.com/apikey
     python3 scripts/generate_avatar_gemini.py path/to/photo.jpg
@@ -26,19 +34,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# A small, fixed set of existing house-style avatars, sent as in-context
-# style references on every call -- fixed on purpose, the same way a
-# training caption is fixed, so results stay comparable across different
-# subjects instead of drifting with whatever reference happened to be
-# picked that day. Deliberately picked for variety (different hair, one
-# with glasses) rather than all-similar, so the model generalizes the
-# *style* (linework weight, flat tones, feature simplification) instead
-# of copying one person's specific features.
-DEFAULT_REFERENCES = [
-    ROOT / "data" / "avatars" / "Andrew Karallis 2021 (1).png",
-    ROOT / "data" / "avatars" / "Becky Johnstone 2025.png",
-    ROOT / "data" / "avatars" / "Greg Wocial Avatar 2025-2.png",
-]
+# The entire existing avatar set, sent as in-context style references on
+# every call -- fixed on purpose (same directory, same sort order every
+# run), so results stay comparable across different subjects instead of
+# drifting with whatever subset happened to be picked that day. Sorted
+# for a deterministic, reviewable request rather than directory-listing
+# order, which can vary by filesystem.
+AVATARS_DIR = ROOT / "data" / "avatars"
+DEFAULT_REFERENCES = sorted(
+    p for p in AVATARS_DIR.iterdir() if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg")
+)
 
 DEFAULT_PROMPT = (
     "Redraw the attached photo as a VCCP-style graphic portrait avatar, matching the exact "
@@ -73,8 +78,9 @@ def main():
         "--references",
         default=",".join(str(p) for p in DEFAULT_REFERENCES),
         help="Comma-separated paths to reference avatar images sent as style examples. "
-        "Fixed defaults are used unless overridden -- keep this consistent across runs "
-        "for comparable results, the same reasoning as a fixed training caption.",
+        f"Defaults to the entire data/avatars/ set ({len(DEFAULT_REFERENCES)} images) unless "
+        "overridden -- keep this consistent across runs for comparable results, the same "
+        "reasoning as a fixed training caption.",
     )
     parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="Style instruction sent with the photo")
     parser.add_argument("--out", default="avatar_out_gemini.png", help="Where to save the result")
