@@ -1197,19 +1197,32 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # it read as one fluid stroke.
     from scipy.interpolate import splev, splprep
 
-    # The previous 7-point set (49, 129, 98, 2, 327, 358, 279) was hand
-    # guessed and, checked directly against a photo crop, sits ABOVE the
-    # actual visible nostril-crease shadow -- those are side-of-nose
-    # points, not the crease itself. MediaPipe's own FACE_LANDMARKS_NOSE
-    # connection graph encodes the real crease as a specific vertex chain
-    # (64-98-97-2-326-327-294); checked directly against a photo crop,
-    # these sit exactly on the visible shadow line and already carry its
-    # natural up-down-up-down wave, so a direct spline through them (no
-    # artificial flat-shelf construction needed) tracks the real contour.
+    # Extending the chain up to the bridge tip (through 45/220/115/48 and
+    # 278/344/440/275) closed the curve into a full oval outlining the
+    # whole nose-tip bump -- direct correction showed that's wrong: the
+    # actual reference is a single arc that stays under the nose (the
+    # bottom rim of the nostrils), not a loop reaching the bridge. Back to
+    # the crease-only chain (64-98-97-2-326-327-294), which checked
+    # correctly against the photo's visible crease position. What was
+    # still missing was the pronounced up-down waviness the hand traces
+    # show -- a plain s=0 spline through only 7 points smooths that away.
+    # Same flat-shelf/step construction as before, applied to these
+    # (correct) points this time instead of the earlier wrong ones.
     nose_bottom_idx = [64, 98, 97, 2, 326, 327, 294]
     pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in nose_bottom_idx])
-    tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
-    xs, ys = splev(np.linspace(0.0, 1.0, 40), tck)
+    xs_list, ys_list = [], []
+    hold_lo, hold_hi = 0.30, 0.70
+    for i in range(len(pts) - 1):
+        p0, p1 = pts[i], pts[i + 1]
+        n = 12
+        t = np.linspace(0.0, 1.0, n, endpoint=(i == len(pts) - 2))
+        seg_x = p0[0] + t * (p1[0] - p0[0])
+        u = np.clip((t - hold_lo) / (hold_hi - hold_lo), 0.0, 1.0)
+        smooth_u = 3 * u**2 - 2 * u**3
+        seg_y = p0[1] + smooth_u * (p1[1] - p0[1])
+        xs_list.append(seg_x)
+        ys_list.append(seg_y)
+    xs, ys = np.concatenate(xs_list), np.concatenate(ys_list)
     img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
 
     # A short philtrum tick between nose and mouth -- the reference style
