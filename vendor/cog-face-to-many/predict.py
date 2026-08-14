@@ -172,15 +172,36 @@ class Predictor(BasePredictor):
             mask_load_image["image"] = kwargs["mask_filename"]
             sampler["latent_image"] = ["104", 0]
 
-            # The masked region starts from the scaffold's blank/white
-            # interior, not real photo detail -- there's nothing worth
-            # partially preserving there, so force full regeneration
-            # regardless of the caller's denoising_strength (which is
-            # tuned for the old whole-photo img2img mode). At the
-            # previous partial-denoise default, the sampler didn't get
-            # enough steps to paint an actual face onto blank canvas and
-            # produced barely-perturbed noise instead.
+            # By default the masked region starts from the scaffold's
+            # blank/white interior, not real photo detail -- there's
+            # nothing worth partially preserving there, so force full
+            # regeneration regardless of the caller's denoising_strength
+            # (which is tuned for the old whole-photo img2img mode). At
+            # the previous partial-denoise default, the sampler didn't
+            # get enough steps to paint an actual face onto blank canvas
+            # and produced barely-perturbed noise instead.
             sampler["denoise"] = 1.0
+
+            # If a style_image is supplied (e.g. a Gemini-generated
+            # draft with the desired line quality/rendering but
+            # unreliable structure), start the masked region's encode
+            # from *it* instead of the blank scaffold interior, at a
+            # partial denoise. The scaffold's own pixels outside the
+            # mask are untouched either way (node 105 always composites
+            # back onto node 101, the scaffold) -- this only changes
+            # what the masked interior's generation is seeded from,
+            # letting ControlNet/InstantID correct style_image's
+            # structure/identity while keeping some of its actual
+            # rendered style. Lower style_denoise keeps more of
+            # style_image's look but also more of its structural
+            # drift; higher corrects structure/identity harder but
+            # erases more of style_image's contribution.
+            if kwargs.get("style_filename"):
+                style_load_image = workflow["106"]["inputs"]
+                style_load_image["image"] = kwargs["style_filename"]
+                inpaint_encode = workflow["104"]["inputs"]
+                inpaint_encode["pixels"] = ["107", 0]
+                sampler["denoise"] = kwargs["style_denoise"]
 
             # SaveImage (node 5) otherwise pulls the KSampler's own
             # decoded output directly -- which re-decodes the *entire*
@@ -245,6 +266,24 @@ class Predictor(BasePredictor):
             "toward a structure without guaranteeing it survives.",
             default=None,
         ),
+        style_image: Path = Input(
+            description="Optional image (e.g. a Gemini-generated draft with the desired line "
+            "quality/rendering but unreliable face structure) used as the starting point for "
+            "the masked interior region, instead of generating it from a blank scaffold. Only "
+            "used when `mask` is also supplied; the scaffold's own pixels outside the mask are "
+            "unaffected either way.",
+            default=None,
+        ),
+        style_denoise: float = Input(
+            default=0.6,
+            ge=0,
+            le=1,
+            description="Denoise strength for the masked region when style_image is given. "
+            "Lower keeps more of style_image's actual rendering (style) but also more of its "
+            "structural drift; higher lets ControlNet/InstantID correct it further toward the "
+            "true structure/identity (likeness) but erases more of style_image's contribution. "
+            "Ignored unless style_image is set.",
+        ),
         style: str = Input(
             default="3D",
             choices=LORA_TYPES,
@@ -304,6 +343,9 @@ class Predictor(BasePredictor):
         mask_filename = (
             self.handle_input_file(mask, prefix="mask") if mask is not None else None
         )
+        style_filename = (
+            self.handle_input_file(style_image, prefix="style") if style_image is not None else None
+        )
         if custom_lora_url is not None:
             # Accept any replicate.delivery-hosted trained_model.tar, not just the
             # legacy "pbxt" bucket -- see parse_custom_lora_url for why.
@@ -337,6 +379,8 @@ class Predictor(BasePredictor):
             lora_scale=lora_scale,
             control_image_strength=control_image_strength,
             mask_filename=mask_filename,
+            style_filename=style_filename,
+            style_denoise=style_denoise,
         )
 
         wf = self.comfyUI.load_workflow(workflow, check_weights=False)

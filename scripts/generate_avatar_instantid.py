@@ -170,6 +170,25 @@ def main():
         "survives. --control-image is required when --mask is given (it becomes the base "
         "artwork for the protected, unmasked region).",
     )
+    parser.add_argument(
+        "--style-image",
+        help="Optional image (e.g. scripts/generate_avatar_gemini.py's output) used as the "
+        "starting point for the masked interior region instead of generating it from a blank "
+        "scaffold. Only used when --mask is also given -- the scaffold's own pixels outside the "
+        "mask (jaw, ears, silhouette -- the actual likeness-carrying structure) are unaffected "
+        "either way, so this only changes what the interior facial detail is seeded from: "
+        "Gemini's polished rendering, corrected back toward the true structure/identity by "
+        "ControlNet/InstantID rather than generated from scratch.",
+    )
+    parser.add_argument(
+        "--style-denoise",
+        type=float,
+        default=0.6,
+        help="Denoise strength for the masked region when --style-image is given, 0-1. Lower "
+        "keeps more of style_image's actual rendering (style) but also more of its structural "
+        "drift; higher corrects structure/identity harder but erases more of style_image's "
+        "contribution. Needs tuning per use -- no proven default yet.",
+    )
     parser.add_argument("--out", default="avatar_out_iid.png", help="Where to save the result")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -316,6 +335,19 @@ def main():
         with open(mask_path, "rb") as f:
             uploaded_mask = replicate.files.create(f)
         predict_input["mask"] = uploaded_mask.urls["get"]
+
+    if args.style_image and not args.mask:
+        sys.exit("--style-image requires --mask (it only affects the masked interior region)")
+
+    if args.style_image:
+        style_path = Path(args.style_image)
+        if not style_path.exists():
+            sys.exit(f"Style image not found: {style_path}")
+        print("Uploading style image...")
+        with open(style_path, "rb") as f:
+            uploaded_style = replicate.files.create(f)
+        predict_input["style_image"] = uploaded_style.urls["get"]
+        predict_input["style_denoise"] = args.style_denoise
 
     print(f"Generating with {MODEL} (InstantID + canny ControlNet + LoRA)...")
     prediction = replicate.predictions.create(

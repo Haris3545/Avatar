@@ -527,5 +527,32 @@
     "_meta": {
       "title": "Composite Generated Region Onto Scaffold"
     }
+  },
+  "106": {
+    "inputs": {
+      "image": "Screenshot 2024-02-26 at 16.13.24.png",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Style Image (e.g. Gemini draft)"
+    }
+  },
+  "107": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "interpolation": "lanczos",
+      "keep_proportion": true,
+      "condition": "always",
+      "image": [
+        "106",
+        0
+      ]
+    },
+    "class_type": "ImageResize+",
+    "_meta": {
+      "title": "Resize Style Image"
+    }
   }
 }
