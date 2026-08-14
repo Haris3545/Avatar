@@ -377,11 +377,12 @@ def main():
         config = types.GenerateContentConfig(seed=args.seed, temperature=args.temperature)
 
     structure_path = None
+    measurements_text = ""
     if args.structure_image:
         structure_path = Path(args.structure_image)
         if not structure_path.exists():
             sys.exit(f"Structure image not found: {structure_path}")
-    elif not args.no_structure:
+    if not args.no_structure:
         # Generate the same landmark-derived structural composite we use
         # for the InstantID pipeline's scaffold -- it's reliably accurate
         # on proportions (that's the whole point of deriving it from
@@ -392,9 +393,27 @@ def main():
         # into a generic "AI cartoon" that merely resembles the subject.
         import composite_line_art
 
-        print("Generating structural reference from photo...")
-        structure_path = photo_path.with_name(photo_path.stem + "_structure_for_gemini.png")
-        composite_line_art.composite_line_art(photo_path, structure_path, glasses=bool(want_glasses))
+        if structure_path is None:
+            print("Generating structural reference from photo...")
+            structure_path = photo_path.with_name(photo_path.stem + "_structure_for_gemini.png")
+            composite_line_art.composite_line_art(photo_path, structure_path, glasses=bool(want_glasses))
+
+        # Proportions have so far only been communicated as an image Gemini
+        # has to eyeball ("match this drawing"), which it's repeatedly
+        # drifted from (jaw width especially). Explicit numeric ratios in
+        # the text prompt are a harder signal to silently ignore.
+        print("Measuring proportions from photo...")
+        photo_im = Image.open(photo_path).convert("RGB")
+        landmarks = composite_line_art.get_face_landmarks(photo_im)
+        if landmarks is not None:
+            foreground = composite_line_art.rembg_foreground(photo_im)
+            w, h = photo_im.size
+            measurements = composite_line_art.compute_measurements(landmarks, foreground, w, h)
+            measurements_text = composite_line_art.format_measurements(measurements)
+            if measurements_text:
+                print(measurements_text)
+        else:
+            print("Warning: no face detected for measurements -- skipping numeric proportions.")
 
     def extract_image(response):
         for part in response.candidates[0].content.parts:
@@ -409,6 +428,8 @@ def main():
     out_path = Path(args.out)
 
     prompt = (STRUCTURE_PREAMBLE + args.prompt) if structure_path else args.prompt
+    if measurements_text:
+        prompt = prompt + "\n\n" + measurements_text
     contents = [prompt]
     if structure_path:
         contents.append(Image.open(structure_path))

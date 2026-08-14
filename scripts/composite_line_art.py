@@ -278,6 +278,100 @@ def _ordered_face_oval_indices():
     return order
 
 
+def compute_measurements(landmarks, foreground: np.ndarray, w: int, h: int) -> dict:
+    """Extract actual numeric proportions for this specific person, all
+    normalized to the distance between the pupils (a stable,
+    subject-independent unit -- unlike absolute pixel distances, which
+    depend on how close the camera was). Structure has so far only been
+    communicated to Gemini as an image ("match this drawing's
+    proportions"), which it has to eyeball and has repeatedly drifted
+    from (jaw width, in particular). Explicit numeric ratios in the text
+    prompt are a much harder signal to silently ignore than a visual
+    reference.
+
+    Anchored on the same interpupillary distance (landmarks 33/263) used
+    elsewhere in this file as eye_span, so these ratios are consistent
+    with any other landmark-derived measurement already in use."""
+    eye_span = float(np.linalg.norm(
+        np.array([landmarks[263].x * w, landmarks[263].y * h])
+        - np.array([landmarks[33].x * w, landmarks[33].y * h])
+    ))
+    if eye_span <= 0:
+        return {}
+
+    oval_order = _ordered_face_oval_indices()
+    oval_pts = np.array([[landmarks[i].x * w, landmarks[i].y * h] for i in oval_order])
+    eye_y = (landmarks[33].y + landmarks[263].y) / 2 * h
+    chin_y = landmarks[152].y * h
+
+    face_width = float(oval_pts[:, 0].max() - oval_pts[:, 0].min())
+    face_height = float(chin_y - oval_pts[:, 1].min())
+
+    jaw_pts = oval_pts[oval_pts[:, 1] > eye_y]
+    jaw_width = float(jaw_pts[:, 0].max() - jaw_pts[:, 0].min()) if len(jaw_pts) else None
+
+    # Same neck/shoulder width-profile approach as crop_to_content, run
+    # here on the un-cropped foreground so shoulder_width and collar_drop
+    # are in the same original-photo coordinate space as the landmarks.
+    ys, xs = np.where(foreground)
+    shoulder_width = collar_drop = None
+    if ys.size:
+        y0, y1 = int(ys.min()), int(ys.max())
+        content_height = y1 - y0
+        any_row = foreground.any(axis=1)
+        first_idx = foreground.argmax(axis=1)
+        last_idx = foreground.shape[1] - 1 - foreground[:, ::-1].argmax(axis=1)
+        widths = np.where(any_row, last_idx - first_idx, 0)
+
+        search_start = y0 + int(content_height * 0.35)
+        search_end = min(y0 + int(content_height * 0.85), y1)
+        if search_start < search_end:
+            neck_y = search_start + int(np.argmin(widths[search_start:search_end]))
+            below = widths[neck_y : y1 + 1]
+            sw = below.max() if below.size else 0
+            if sw > widths[neck_y]:
+                threshold = widths[neck_y] + (sw - widths[neck_y]) * 0.85
+                candidates = np.where(below >= threshold)[0]
+                if candidates.size:
+                    shoulder_y = neck_y + int(candidates[0])
+                    shoulder_width = float(sw)
+                    collar_drop = float(shoulder_y - chin_y)
+
+    measurements = {"face_width": face_width, "face_height": face_height, "jaw_width": jaw_width}
+    if shoulder_width is not None:
+        measurements["shoulder_width"] = shoulder_width
+        measurements["collar_drop"] = collar_drop
+
+    return {k: round(v / eye_span, 2) for k, v in measurements.items() if v is not None}
+
+
+def format_measurements(measurements: dict) -> str:
+    """Render compute_measurements()'s output as the text block appended
+    to the Gemini prompt."""
+    if not measurements:
+        return ""
+    labels = {
+        "face_width": "face width (cheek to cheek)",
+        "face_height": "face height (forehead to chin)",
+        "jaw_width": "jaw width",
+        "shoulder_width": "shoulder width",
+        "collar_drop": "collar drop (chin to collar line)",
+    }
+    lines = [
+        f"- {labels[k]} = {v} units"
+        for k, v in measurements.items()
+        if k in labels
+    ]
+    return (
+        "Measured proportions for this specific person, in units of their own "
+        "interpupillary distance (the distance between their pupils = 1.00 unit exactly):\n"
+        + "\n".join(lines)
+        + "\nTreat these as strict numeric targets, not just a visual approximation to eyeball "
+        "from the structural image -- if the drawing's proportions don't match these ratios, "
+        "the drawing is wrong even if it looks plausible on its own."
+    )
+
+
 def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0004, samples: int = 400, min_area_frac: float = 0.002, include_holes: bool = False, smoothing: float = 0.15):
     """Fit a smooth closed curve through each significant contour of a mask
     (hair and clothes are frequently two disconnected blobs, split by a
