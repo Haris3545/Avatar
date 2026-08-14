@@ -1200,32 +1200,32 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # A direct correction against a real photo traced the whole nose sitting
     # a few px too low here versus its actual position -- shift it up.
     nose_shift = -eye_span * 0.045
-    # Fit directly against the exact traced points from a real photo
-    # (not eyeballed): two short legs drop from each outer nostril corner
-    # (49, 279) to a near-flat shelf, which then sags down to a shallow
-    # center dip -- and that dip's lowest point lands almost exactly on
-    # the nose-tip landmark (2)'s own y position, so it's used directly
-    # rather than as an offset guess. flat_frac/leg_frac below were solved
-    # from that trace: the flat shelf sits ~70% of the way down from each
-    # corner to the tip, and the legs only extend ~8% of the corner-to-
-    # corner span before flattening.
+    # A 5-point control spline fit to this shape (legs + flat shelf + center
+    # dip) matched the traced points numerically, but a smoothing spline
+    # through only 5 points has no way to hold a flat *segment* -- cubic
+    # interpolation just rounds it into a plain arc between them, which is
+    # exactly the "just a U" look that kept coming back. Instead, this
+    # samples the real proportional shape of that trace directly: for each
+    # point, how far it sits below the straight corner-to-corner line,
+    # normalized by the deepest (center) point -- a face-size-independent
+    # template driven by only 3 real landmarks (outer nostril corners 49 /
+    # 279 for the baseline, tip 2 for depth scale), reproducible on any
+    # face from those same 3 points.
+    NOSE_DEPTH_TEMPLATE = [
+        0.11, 0.00, 0.55, 0.61, 0.62, 0.62, 0.62, 0.62, 0.68, 0.77,
+        0.88, 0.97, 1.00, 1.00, 0.99, 0.95, 0.89, 0.81, 0.72, 0.63,
+        0.58, 0.58, 0.57, 0.48, 0.00,
+    ]
     left = np.array([landmarks[49].x * w, landmarks[49].y * h + nose_shift])
     right = np.array([landmarks[279].x * w, landmarks[279].y * h + nose_shift])
     tip_y = landmarks[2].y * h + nose_shift
-    span = right[0] - left[0]
-    leg_frac = 0.08
-    flat_frac = 0.70
-    flat_y_left = left[1] + flat_frac * (tip_y - left[1])
-    flat_y_right = right[1] + flat_frac * (tip_y - right[1])
-    control = np.array([
-        left,
-        [left[0] + leg_frac * span, flat_y_left],
-        [(left[0] + right[0]) / 2, tip_y],
-        [right[0] - leg_frac * span, flat_y_right],
-        right,
-    ])
-    tck, _ = splprep([control[:, 0], control[:, 1]], s=len(control) * 1.5, k=3)
-    xs, ys = splev(np.linspace(0.0, 1.0, 24), tck)
+    grid = np.linspace(0.0, 1.0, len(NOSE_DEPTH_TEMPLATE))
+    xs_raw = left[0] + grid * (right[0] - left[0])
+    baseline = left[1] + grid * (right[1] - left[1])
+    center_depth = tip_y - (left[1] + right[1]) / 2
+    ys_raw = baseline + np.array(NOSE_DEPTH_TEMPLATE) * center_depth
+    tck, _ = splprep([xs_raw, ys_raw], s=len(xs_raw) * 0.1, k=3)
+    xs, ys = splev(np.linspace(0.0, 1.0, 30), tck)
     img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
 
     # A short philtrum tick between nose and mouth -- the reference style
