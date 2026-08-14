@@ -1,5 +1,6 @@
 data/lora_dataset/
 data/lora_dataset.zip
+data/headshots/*_structure_for_gemini.png
 vendor/cog-face-to-many/ComfyUI/
 __pycache__/
 *.pyc

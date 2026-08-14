@@ -88,6 +88,21 @@ def filter_references(paths, want_glasses, want_beard):
     print(f"Filtered to {len(filtered)} reference(s) matching glasses={want_glasses}, beard={want_beard}")
     return filtered
 
+STRUCTURE_PREAMBLE = (
+    "The FIRST attached image is a structural line-art drawing generated directly from this "
+    "exact photo's measured face geometry (jaw shape, eyebrow/eye/nose/mouth position, hairline, "
+    "glasses shape, shoulder/collar line). Use it as the authoritative source for proportions and "
+    "feature positions -- match its face shape, feature spacing, and pose exactly, do not "
+    "reinterpret or re-guess the structure from the photo. Your job is to redraw/polish that exact "
+    "structural drawing into finished line art -- improving its stroke confidence, hair rendering, "
+    "and shading -- not to generate a fresh interpretation of the photo. "
+    "The SECOND attached image is the original photo, included only for actual visual detail the "
+    "structural drawing doesn't capture (skin tone, real hair color/texture, precise glasses "
+    "color) -- never let it override the first image's proportions. "
+    "The remaining attached images are house-style reference avatars for line quality and "
+    "rendering style only, not structure. "
+)
+
 DEFAULT_PROMPT = (
     "Redraw the attached photo as a VCCP-style graphic portrait avatar, matching the exact "
     "illustration style of the other attached reference avatar images -- not just loosely "
@@ -164,6 +179,18 @@ def main():
         action="store_true",
         help="subject is clean-shaven -- exclude bearded references",
     )
+    parser.add_argument(
+        "--structure-image",
+        help="Path to a structural line-art image (composite_line_art.py's output) to anchor "
+        "proportions/positions -- generated automatically from the photo if not given. Pass "
+        "--no-structure to disable this entirely and generate from the photo alone.",
+    )
+    parser.add_argument(
+        "--no-structure",
+        action="store_true",
+        help="skip the structural reference entirely and generate from the photo alone (the "
+        "original behavior) -- useful for comparing against the structure-anchored result.",
+    )
     args = parser.parse_args()
 
     if args.glasses and args.no_glasses:
@@ -195,11 +222,34 @@ def main():
 
     client = genai.Client(api_key=api_key)
 
+    structure_path = None
+    if args.structure_image:
+        structure_path = Path(args.structure_image)
+        if not structure_path.exists():
+            sys.exit(f"Structure image not found: {structure_path}")
+    elif not args.no_structure:
+        # Generate the same landmark-derived structural composite we use
+        # for the InstantID pipeline's scaffold -- it's reliably accurate
+        # on proportions (that's the whole point of deriving it from
+        # measured face landmarks) even though its own line quality isn't
+        # what we want as a final deliverable. Handing it to Gemini as the
+        # thing to *polish* rather than asking Gemini to reinterpret the
+        # raw photo from scratch is what should keep this from drifting
+        # into a generic "AI cartoon" that merely resembles the subject.
+        import composite_line_art
+
+        print("Generating structural reference from photo...")
+        structure_path = photo_path.with_name(photo_path.stem + "_structure_for_gemini.png")
+        composite_line_art.composite_line_art(photo_path, structure_path, glasses=bool(want_glasses))
+
     print(f"Loading {len(reference_paths)} reference avatar(s)...")
-    contents = [args.prompt]
+    prompt = (STRUCTURE_PREAMBLE + args.prompt) if structure_path else args.prompt
+    contents = [prompt]
+    if structure_path:
+        contents.append(Image.open(structure_path))
+    contents.append(Image.open(photo_path))
     for p in reference_paths:
         contents.append(Image.open(p))
-    contents.append(Image.open(photo_path))
 
     print(f"Generating with {args.model}...")
     response = client.models.generate_content(model=args.model, contents=contents)
