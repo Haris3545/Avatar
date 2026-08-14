@@ -1200,18 +1200,31 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # A direct correction against a real photo traced the whole nose sitting
     # a few px too low here versus its actual position -- shift it up.
     nose_shift = -eye_span * 0.045
-    # The original 7-landmark gull-wing spline (s=0, exact interpolation)
-    # had visible kinks at each landmark. A follow-up fix dropped to just
-    # 3 points (both nostril corners + tip), which removed the kinks but
-    # also flattened out the real structure -- a direct correction against
-    # a real photo confirmed the actual shape has a subtle upward bump at
-    # the septum/center, not a bare downward scoop. Keeping the full
-    # landmark set but adding a smoothing factor (s>0, an approximating
-    # rather than interpolating spline) rounds off the kinks while
-    # preserving that center bump.
-    nose_bottom_idx = [49, 129, 98, 2, 327, 358, 279]
-    pts = np.array([(landmarks[i].x * w, landmarks[i].y * h + nose_shift) for i in nose_bottom_idx])
-    tck, _ = splprep([pts[:, 0], pts[:, 1]], s=len(pts) * 6, k=3)
+    # Two earlier attempts both missed: a 7-landmark exact-interpolation
+    # spline had visible kinks; smoothing that (or cutting to 3 points)
+    # rounded it into a shallow scoop. A direct trace against a real photo
+    # showed neither -- the actual shape is a "staple": two short, nearly
+    # vertical legs dropping from each outer nostril corner, joined by a
+    # flat-ish bottom with a slight center rise, not a continuous curve.
+    # Built explicitly from the outer nostril corners (49, 279) and the
+    # tip (2) rather than fit through all 7 raw points, since those two
+    # corners plus the tip are what actually define this shape on any
+    # face -- the intermediate landmarks (129, 98, 327, 358) were adding
+    # noise, not signal.
+    left = np.array([landmarks[49].x * w, landmarks[49].y * h + nose_shift])
+    right = np.array([landmarks[279].x * w, landmarks[279].y * h + nose_shift])
+    tip_y = landmarks[2].y * h + nose_shift
+    span = right[0] - left[0]
+    leg_frac = 0.16
+    bump = eye_span * 0.012
+    control = np.array([
+        left,
+        [left[0] + leg_frac * span, tip_y],
+        [(left[0] + right[0]) / 2, tip_y - bump],
+        [right[0] - leg_frac * span, tip_y],
+        right,
+    ])
+    tck, _ = splprep([control[:, 0], control[:, 1]], s=len(control) * 2, k=3)
     xs, ys = splev(np.linspace(0.0, 1.0, 24), tck)
     img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
 
