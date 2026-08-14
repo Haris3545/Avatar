@@ -1197,21 +1197,13 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # it read as one fluid stroke.
     from scipy.interpolate import splev, splprep
 
-    # Several rounds of fitting increasingly elaborate shapes to noisy
-    # mouse-trace data (a depth template, then a "boxy" version, then a
-    # literal staircase reproduction) lost sight of the actual goal: a
-    # simple line along the real bottom-of-nose landmarks, sitting where
-    # the nose actually is in the photo. Reverted to that directly --
-    # the real nose-bottom contour (nostril wing, tip, nostril wing),
-    # lightly smoothed to remove per-landmark kinks, no artificial
-    # vertical shift. Position and shape verified directly against a
-    # rendered crop of the photo, not against hand-trace data.
-    # Smoothing the spline (s>0) doesn't just round the kinks -- it pulls
-    # the whole curve toward the outer points (49/279, which sit up on
-    # the side of the nose, not its bottom), dragging the entire line up
-    # away from the visible crease. Exact interpolation (s=0) through the
-    # raw landmarks -- verified directly against a photo crop -- sits
-    # right on it.
+    # Position, not shape, is the priority right now: this passes exactly
+    # through the real measured landmarks (nostril wings, tip, nostril
+    # wings), which is guaranteed correct since it's the actual photo's
+    # own geometry, not a reconstruction. Verified directly against a
+    # photo crop. Shape refinement (a boxier, stepped profile was traced
+    # repeatedly) should build on top of this baseline without moving it,
+    # rather than risk another position regression.
     nose_bottom_idx = [49, 129, 98, 2, 327, 358, 279]
     pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in nose_bottom_idx])
     tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
