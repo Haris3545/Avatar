@@ -5,3 +5,4 @@ onnxruntime
 mediapipe
 scipy
 numpy
+google-genai
