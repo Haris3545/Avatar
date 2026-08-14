@@ -1197,55 +1197,24 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # it read as one fluid stroke.
     from scipy.interpolate import splev, splprep
 
-    # A direct correction against a real photo traced the whole nose sitting
-    # a few px too low here versus its actual position -- shift it up.
-    nose_shift = -eye_span * 0.045
-    # A 5-point control spline fit to this shape (legs + flat shelf + center
-    # dip) matched the traced points numerically, but a smoothing spline
-    # through only 5 points has no way to hold a flat *segment* -- cubic
-    # interpolation just rounds it into a plain arc between them, which is
-    # exactly the "just a U" look that kept coming back. Instead, this
-    # samples the real proportional shape of that trace directly: for each
-    # point, how far it sits below the straight corner-to-corner line,
-    # normalized by the deepest (center) point -- a face-size-independent
-    # template driven by only 3 real landmarks (outer nostril corners 49 /
-    # 279 for the baseline, tip 2 for depth scale), reproducible on any
-    # face from those same 3 points.
-    # A second round of tracing (cleaner than the first) reproduced the
-    # same general two-shoulder-plus-peak shape, softened, and showed the
-    # depth running about 8% deeper than this template's amplitude was
-    # producing -- template values updated from that trace, plus a small
-    # depth boost to match.
-    # A third round (annotated with sample points against the photo
-    # directly, not a hand trace) showed a noticeably boxier profile than
-    # this: steep near-vertical legs starting close to the corners, and a
-    # wide flat shelf across most of the width rather than a single
-    # tapering peak -- widened the plateau and steepened the leg rise.
-    # A fourth round (exact Mark Trainer coordinates) showed that even
-    # this boxy version was still too smooth/rounded to be the real
-    # shape: nearest-point matching against it read as close (~1px mean),
-    # but that metric can't tell a smooth curve from a stepped one if
-    # both pass near the same points -- the actual traced *path*, read in
-    # sequence, is a genuine staircase: a near-vertical drop at each
-    # corner, a flat shelf, a deeper notch in the middle, not a
-    # continuous curve at all. Rebuilt directly from that path
-    # (parametrized by cumulative distance along it, not x, since the
-    # vertical segments have repeated x) instead of guessing at a smooth
-    # profile shape again.
-    NOSE_DEPTH_TEMPLATE = [
-        0.000, 0.190, 0.349, 0.501, 0.583, 0.719, 0.733, 0.739, 0.745, 0.767,
-        0.859, 0.966, 0.997, 0.974, 0.915, 0.820, 0.739, 0.726, 0.733, 0.712,
-        0.613, 0.479, 0.328, 0.159, 0.000,
-    ]
-    left = np.array([landmarks[49].x * w, landmarks[49].y * h + nose_shift])
-    right = np.array([landmarks[279].x * w, landmarks[279].y * h + nose_shift])
-    tip_y = landmarks[2].y * h + nose_shift
-    grid = np.linspace(0.0, 1.0, len(NOSE_DEPTH_TEMPLATE))
-    xs_raw = left[0] + grid * (right[0] - left[0])
-    baseline = left[1] + grid * (right[1] - left[1])
-    center_depth = tip_y - (left[1] + right[1]) / 2
-    ys_raw = baseline + np.array(NOSE_DEPTH_TEMPLATE) * center_depth
-    tck, _ = splprep([xs_raw, ys_raw], s=len(xs_raw) * 0.02, k=3)
+    # Several rounds of fitting increasingly elaborate shapes to noisy
+    # mouse-trace data (a depth template, then a "boxy" version, then a
+    # literal staircase reproduction) lost sight of the actual goal: a
+    # simple line along the real bottom-of-nose landmarks, sitting where
+    # the nose actually is in the photo. Reverted to that directly --
+    # the real nose-bottom contour (nostril wing, tip, nostril wing),
+    # lightly smoothed to remove per-landmark kinks, no artificial
+    # vertical shift. Position and shape verified directly against a
+    # rendered crop of the photo, not against hand-trace data.
+    # Smoothing the spline (s>0) doesn't just round the kinks -- it pulls
+    # the whole curve toward the outer points (49/279, which sit up on
+    # the side of the nose, not its bottom), dragging the entire line up
+    # away from the visible crease. Exact interpolation (s=0) through the
+    # raw landmarks -- verified directly against a photo crop -- sits
+    # right on it.
+    nose_bottom_idx = [49, 129, 98, 2, 327, 358, 279]
+    pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in nose_bottom_idx])
+    tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
     xs, ys = splev(np.linspace(0.0, 1.0, 30), tck)
     img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
 
