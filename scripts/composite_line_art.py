@@ -1211,10 +1211,15 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # template driven by only 3 real landmarks (outer nostril corners 49 /
     # 279 for the baseline, tip 2 for depth scale), reproducible on any
     # face from those same 3 points.
+    # A second round of tracing (cleaner than the first) reproduced the
+    # same general two-shoulder-plus-peak shape, softened, and showed the
+    # depth running about 8% deeper than this template's amplitude was
+    # producing -- template values updated from that trace, plus a small
+    # depth boost to match.
     NOSE_DEPTH_TEMPLATE = [
-        0.11, 0.00, 0.55, 0.61, 0.62, 0.62, 0.62, 0.62, 0.68, 0.77,
-        0.88, 0.97, 1.00, 1.00, 0.99, 0.95, 0.89, 0.81, 0.72, 0.63,
-        0.58, 0.58, 0.57, 0.48, 0.00,
+        0.00, 0.36, 0.48, 0.56, 0.60, 0.60, 0.60, 0.60, 0.70, 0.76,
+        0.82, 0.91, 0.96, 0.99, 1.00, 0.97, 0.91, 0.79, 0.71, 0.66,
+        0.61, 0.56, 0.55, 0.49, 0.00,
     ]
     left = np.array([landmarks[49].x * w, landmarks[49].y * h + nose_shift])
     right = np.array([landmarks[279].x * w, landmarks[279].y * h + nose_shift])
@@ -1222,7 +1227,7 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     grid = np.linspace(0.0, 1.0, len(NOSE_DEPTH_TEMPLATE))
     xs_raw = left[0] + grid * (right[0] - left[0])
     baseline = left[1] + grid * (right[1] - left[1])
-    center_depth = tip_y - (left[1] + right[1]) / 2
+    center_depth = (tip_y - (left[1] + right[1]) / 2) * 1.08
     ys_raw = baseline + np.array(NOSE_DEPTH_TEMPLATE) * center_depth
     tck, _ = splprep([xs_raw, ys_raw], s=len(xs_raw) * 0.1, k=3)
     xs, ys = splev(np.linspace(0.0, 1.0, 30), tck)
@@ -1258,11 +1263,22 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # reference overlay and effectively double-counted the shift; a third
     # round, measured against the actually-corrected overlay, showed 0.09
     # overshooting by ~8px. A fourth round then showed the corrected 0.005
-    # undershooting by ~6px -- these two clean measurements converge on
-    # 0.07, close to the original pre-session value of 0.05.
-    mouth_shift = eye_span * 0.07
+    # undershooting by ~6px, converging on 0.07. A fifth round then showed
+    # 0.07 sitting ~4px too low, concentrated on the right side -- the raw
+    # landmark corners (61, 291) aren't at the same height on this photo,
+    # so the whole curve carries a rightward downward tilt the traces
+    # never showed. Leveled that out (subtract the corner-to-corner linear
+    # trend, re-add the flat average of both corner heights) before
+    # applying the reduced shift.
+    mouth_shift = eye_span * 0.03
     upper_lip_idx = [61, 40, 37, 0, 267, 270, 291]
-    upts = np.array([(landmarks[i].x * w, landmarks[i].y * h + mouth_shift) for i in upper_lip_idx])
+    raw_pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in upper_lip_idx])
+    corner_l, corner_r = raw_pts[0], raw_pts[-1]
+    avg_corner_y = (corner_l[1] + corner_r[1]) / 2
+    t = (raw_pts[:, 0] - corner_l[0]) / (corner_r[0] - corner_l[0])
+    trend = corner_l[1] * (1 - t) + corner_r[1] * t
+    leveled_y = raw_pts[:, 1] - trend + avg_corner_y
+    upts = np.stack([raw_pts[:, 0], leveled_y + mouth_shift], axis=1)
     utck, _ = splprep([upts[:, 0], upts[:, 1]], s=0, k=3)
     uxs, uys = splev(np.linspace(0, 1, 40), utck)
     img = draw_smooth_open_stroke(img, list(zip(uxs, uys)), width=line_width)
