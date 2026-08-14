@@ -80,10 +80,33 @@ DETAIL_WIDTH = 5
 WIDTH_REFERENCE_PX = 900
 
 CLOTHES_FILL = (165, 165, 165)
+CLOTHES_SHADOW_FILL = (120, 120, 120)
 
 
 def stroke_scale(w: int, h: int) -> float:
     return min(w, h) / WIDTH_REFERENCE_PX
+
+
+def crop_to_content(out: np.ndarray, foreground: np.ndarray, margin_frac: float = 0.08) -> tuple:
+    """Crop the canvas to the subject's own bounding box plus a margin,
+    instead of leaving whatever headroom/framing the source photo happened
+    to have -- the reference avatars crop tight and bold, filling most of
+    the frame, while our output was leaving noticeably more empty white
+    space above the head. Returns the crop bounds too, so a caller with a
+    second same-size array (scaffold_composite's mask) can apply the exact
+    same crop and stay pixel-aligned."""
+    ys, xs = np.where(foreground)
+    if ys.size == 0:
+        return out, (0, out.shape[0], 0, out.shape[1])
+    y0, y1 = int(ys.min()), int(ys.max())
+    x0, x1 = int(xs.min()), int(xs.max())
+    my = int((y1 - y0) * margin_frac)
+    mx = int((x1 - x0) * margin_frac)
+    top = max(y0 - my, 0)
+    bottom = min(y1 + my, out.shape[0])
+    left = max(x0 - mx, 0)
+    right = min(x1 + mx, out.shape[1])
+    return out[top:bottom, left:right], (top, bottom, left, right)
 
 
 def disk(radius: int) -> np.ndarray:
@@ -144,7 +167,14 @@ def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
     """Replace traced eye detail with the house style's extreme
     simplification: a solid dot for the pupil and a single curved arc for
     the upper eyelid, positioned and scaled from real landmark geometry
-    (not guessed) so it still lines up with the actual face."""
+    (not guessed) so it still lines up with the actual face.
+
+    Every mark here is drawn through the supersample+Lanczos helpers
+    (draw_smooth_dot / draw_smooth_open_stroke) instead of plain
+    ImageDraw calls -- PIL's native ellipse/arc/line drawing has no
+    anti-aliasing, and eyes are small enough that the difference is
+    visible next to the rest of the face, which already gets this
+    treatment."""
     img = Image.fromarray(out)
     draw = ImageDraw.Draw(img)
 
@@ -158,21 +188,29 @@ def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
 
         # Clear a generous region around the eye back to white first, to
         # erase whatever traced detail (eyelid lines, eyelashes) was there.
+        # This is a plain fill with nothing drawn right at its own edge, so
+        # it doesn't need anti-aliasing.
         clear_r = eye_width * 0.75
         draw.ellipse([cx - clear_r, cy - clear_r * 0.7, cx + clear_r, cy + clear_r * 0.7], fill=(255, 255, 255))
 
         # Pupil: solid dot
         pupil_r = max(eye_width * 0.13, 3)
-        draw.ellipse([cx - pupil_r, cy - pupil_r, cx + pupil_r, cy + pupil_r], fill=(0, 0, 0))
+        img = draw_smooth_dot(img, cx, cy, pupil_r)
 
         # Upper eyelid: single arc spanning the eye corners, curving
-        # upward above the pupil
+        # upward above the pupil -- sampled as points along the ellipse
+        # so it can go through the same open-stroke helper as everything
+        # else instead of PIL's unaliased native arc.
         arc_left = min(p1[0], p2[0]) - eye_width * 0.08
         arc_right = max(p1[0], p2[0]) + eye_width * 0.08
         arc_top = cy - eye_width * 0.45
         arc_bottom = cy + eye_width * 0.15
-        stroke_w = max(int(eye_width * 0.09), 2)
-        draw.arc([arc_left, arc_top, arc_right, arc_bottom], start=200, end=340, fill=(0, 0, 0), width=stroke_w)
+        stroke_w = max(eye_width * 0.09, 2)
+        angles = np.radians(np.linspace(200, 340, 24))
+        acx, acy = (arc_left + arc_right) / 2, (arc_top + arc_bottom) / 2
+        arx, ary = (arc_right - arc_left) / 2, (arc_bottom - arc_top) / 2
+        arc_points = list(zip(acx + arx * np.cos(angles), acy + ary * np.sin(angles)))
+        img = draw_smooth_open_stroke(img, arc_points, width=stroke_w)
 
         # A short downward hook at the arc's outer corner reads as an
         # eyelash flick, matching the reference avatars -- without it the
@@ -180,7 +218,8 @@ def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
         outer_x = arc_left if p1[0] < p2[0] else arc_right
         hook_end_x = outer_x - eye_width * 0.1 if p1[0] < p2[0] else outer_x + eye_width * 0.1
         hook_y = cy - eye_width * 0.1
-        draw.line([(outer_x, hook_y), (hook_end_x, hook_y + eye_width * 0.12)], fill=(0, 0, 0), width=stroke_w)
+        img = draw_smooth_open_stroke(img, [(outer_x, hook_y), (hook_end_x, hook_y + eye_width * 0.12)], width=stroke_w)
+        draw = ImageDraw.Draw(img)
 
     return np.array(img)
 
@@ -333,6 +372,47 @@ def draw_tapered_stroke(canvas: Image.Image, points, mid_width: float, end_width
     return canvas
 
 
+def draw_smooth_open_stroke(canvas: Image.Image, points, width: float, fill=(0, 0, 0), supersample: int = 6) -> Image.Image:
+    """Anti-aliased constant-width open stroke -- the open-path analog of
+    draw_smooth_strokes (which always closes the path back to its start).
+    Used for the nose/mouth/eye marks, which were previously drawn with
+    plain ImageDraw.line/arc/ellipse calls straight onto the full-resolution
+    canvas -- PIL's native drawing has no anti-aliasing, so those specific
+    features looked visibly more jagged than everything else (the
+    silhouette, hair, eyebrows, glasses) which already got this same
+    supersample+Lanczos treatment."""
+    if len(points) < 2:
+        return canvas
+
+    w, h = canvas.size
+    big = Image.new("RGBA", (w * supersample, h * supersample), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(big)
+    stroke_w = max(1, int(width * supersample))
+    r = stroke_w / 2
+    scaled = [(px * supersample, py * supersample) for px, py in points]
+    draw.line(scaled, fill=fill + (255,), width=stroke_w, joint="curve")
+    for px, py in (scaled[0], scaled[-1]):
+        draw.ellipse([px - r, py - r, px + r, py + r], fill=fill + (255,))
+
+    big = big.resize((w, h), Image.LANCZOS)
+    canvas.paste(big, (0, 0), big)
+    return canvas
+
+
+def draw_smooth_dot(canvas: Image.Image, cx: float, cy: float, radius: float, fill=(0, 0, 0), supersample: int = 6) -> Image.Image:
+    """Anti-aliased filled circle -- same rationale as draw_smooth_open_stroke,
+    for the pupil dot."""
+    w, h = canvas.size
+    big = Image.new("RGBA", (w * supersample, h * supersample), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(big)
+    r = radius * supersample
+    sx, sy = cx * supersample, cy * supersample
+    draw.ellipse([sx - r, sy - r, sx + r, sy + r], fill=fill + (255,))
+    big = big.resize((w, h), Image.LANCZOS)
+    canvas.paste(big, (0, 0), big)
+    return canvas
+
+
 def draw_pointed_stroke(canvas: Image.Image, points, base_width: float, fill=(0, 0, 0), supersample: int = 6) -> Image.Image:
     """Draw an open stroke that starts at base_width and tapers linearly to
     a fine point at its last point -- for a hair strand escaping the solid
@@ -356,6 +436,60 @@ def draw_pointed_stroke(canvas: Image.Image, points, base_width: float, fill=(0,
 
     big = big.resize((w, h), Image.LANCZOS)
     canvas.paste(big, (0, 0), big)
+    return canvas
+
+
+def jag_fringe(contour: np.ndarray, n_teeth: int = 6, depth_frac: float = 0.035) -> np.ndarray:
+    """Perturb the top band of a hair contour with a few deliberate pointed
+    teeth -- a fixed-frequency sine ripple, not random noise, so it reads
+    as a deliberate tufted/jagged fringe edge (matching the reference
+    avatars) instead of the smooth, plain curve smooth_contours would
+    otherwise produce for hair like it does for everything else."""
+    top_y = contour[:, 1].min()
+    bbox_h = contour[:, 1].max() - top_y
+    band = contour[:, 1] < top_y + bbox_h * 0.15
+    if not band.any():
+        return contour
+    depth = bbox_h * depth_frac
+    xs = contour[band, 0]
+    span = max(xs.max() - xs.min(), 1)
+    phase = (xs - xs.min()) / span
+    teeth = np.abs(np.sin(np.pi * n_teeth * phase))
+    result = contour.copy()
+    result[band, 1] = result[band, 1] - depth * teeth
+    return result
+
+
+def draw_hair_texture(canvas: Image.Image, hair_only: np.ndarray, detail_width: float, n_marks: int = 6, seed: int = 7) -> Image.Image:
+    """A handful of short, thin, dark-grey directional strokes layered on
+    top of the solid black hair fill -- matches the reference avatars'
+    internal hair texture (strand direction hinted through scratch marks)
+    instead of a flat, featureless black mass. Positions are sampled with a
+    fixed seed so re-runs on the same photo are reproducible, and confined
+    to the hair mask's own middle band so they don't crowd the crown
+    (already marked by draw_hair_strands) or the very edge."""
+    ys, xs = np.where(hair_only)
+    if ys.size == 0:
+        return canvas
+    top_y, bottom_y = ys.min(), ys.max()
+    bbox_h = bottom_y - top_y
+    band = (ys > top_y + bbox_h * 0.15) & (ys < top_y + bbox_h * 0.85)
+    ys_b, xs_b = ys[band], xs[band]
+    if ys_b.size < n_marks:
+        return canvas
+
+    rng = np.random.default_rng(seed)
+    idxs = rng.choice(ys_b.size, size=n_marks, replace=False)
+    length = max(bbox_h * 0.05, detail_width * 3)
+    for i in idxs:
+        bx, by = float(xs_b[i]), float(ys_b[i])
+        # Roughly downward-flowing direction (hair falls from the crown),
+        # with a small per-mark spread so they don't all read as parallel.
+        angle = np.pi / 2 + rng.uniform(-0.35, 0.35)
+        dx, dy = np.cos(angle), np.sin(angle)
+        tip = (bx + dx * length, by + dy * length)
+        canvas = draw_pointed_stroke(canvas, [(bx, by), tip], base_width=max(1, detail_width * 0.4), fill=(70, 70, 70))
+
     return canvas
 
 
@@ -414,6 +548,55 @@ def draw_smooth_fills(canvas: Image.Image, contours, fill=(0, 0, 0), supersample
     return canvas
 
 
+def draw_collar_hint(canvas: Image.Image, clothes_outer, detail_width: float) -> Image.Image:
+    """A thin inset line paralleling the top (shoulder/neckline) edge of
+    the clothing silhouette -- a cheap, generically-derivable stand-in for
+    a collar seam. There's no landmark source for an actual collar shape
+    (MediaPipe's face landmarker doesn't extend to the shoulders), so
+    this doesn't claim to trace a real collar -- it only adds the kind of
+    interior structure line the reference avatars have and a single flat
+    silhouette otherwise completely lacks."""
+    if not clothes_outer:
+        return canvas
+
+    contour = max(
+        clothes_outer,
+        key=lambda c: (c[:, 0].max() - c[:, 0].min()) * (c[:, 1].max() - c[:, 1].min()),
+    )
+    top_y = contour[:, 1].min()
+    bbox_h = contour[:, 1].max() - top_y
+    cx, cy = contour[:, 0].mean(), contour[:, 1].mean()
+
+    band = contour[contour[:, 1] < top_y + bbox_h * 0.12]
+    if len(band) < 6:
+        return canvas
+    band = band[np.argsort(band[:, 0])]
+
+    inset = bbox_h * 0.045
+    pts = []
+    for px, py in band:
+        dx, dy = cx - px, cy - py
+        norm = max((dx**2 + dy**2) ** 0.5, 1)
+        pts.append((px + dx / norm * inset, py + dy / norm * inset))
+
+    return draw_smooth_open_stroke(canvas, pts, width=max(1, detail_width - 2))
+
+
+def draw_clothes_shading(canvas: Image.Image, clothes_only: np.ndarray, gray: np.ndarray) -> Image.Image:
+    """A second, darker flat grey patch within the clothing silhouette,
+    covering whichever half of it the photo's own lighting shows as
+    darker -- built the same way the reference avatars build dimension
+    (a couple of adjacent flat tones, no gradient), instead of leaving
+    clothing as one single flat grey with no shading vocabulary at all."""
+    vals = gray[clothes_only]
+    if vals.size < 50:
+        return canvas
+    median = np.median(vals)
+    dark_clothes = clothes_only & (gray <= median)
+    dark_contours = smooth_contours(dark_clothes, min_area_frac=0.004, smoothing=1.2)
+    return draw_smooth_fills(canvas, dark_contours, fill=CLOTHES_SHADOW_FILL)
+
+
 def reveal_ears(hair_clothes: np.ndarray, cat_mask: np.ndarray, im: Image.Image, landmarks, w: int, h: int, search_frac: float = 0.35) -> np.ndarray:
     """A shadowed ear against dark hair can get misclassified as hair
     entirely by the segmenter (similar tones, similar local texture),
@@ -460,7 +643,23 @@ def reveal_ears(hair_clothes: np.ndarray, cat_mask: np.ndarray, im: Image.Image,
         skin_like = dist < 5.0
 
         hair_window = hair_clothes[y0:y1, x0:x1]
-        corrected[y0:y1, x0:x1][hair_window & skin_like] = False
+        ear_notch = hair_window & skin_like
+
+        # A per-pixel color match is noisy at this scale (JPEG blocking,
+        # a stray hair strand crossing the ear) and previously carved a
+        # jagged, scattered notch instead of one clean ear-shaped gap. Close
+        # small internal gaps, then keep only the single largest connected
+        # blob (a real ear is one shape; scattered single-pixel matches
+        # elsewhere in the window aren't) before subtracting it out.
+        notch_kernel = disk(max(2, int(radius * 0.08)))
+        ear_notch = ndimage.binary_closing(ear_notch, structure=notch_kernel)
+        ear_notch = ndimage.binary_opening(ear_notch, structure=notch_kernel)
+        labeled, num = ndimage.label(ear_notch)
+        if num > 1:
+            sizes = ndimage.sum(ear_notch, labeled, range(1, num + 1))
+            ear_notch = labeled == (np.argmax(sizes) + 1)
+
+        corrected[y0:y1, x0:x1][ear_notch] = False
 
     return corrected
 
@@ -598,17 +797,23 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
         clothes_only, min_area_frac=0.001, include_holes=True, smoothing=1.5
     )
     silhouette_contours = smooth_contours(foreground, smoothing=1.5)
+    # A jagged/tufted fringe (see jag_fringe) instead of hair's otherwise
+    # smooth spline-fit edge, matching the reference avatars' hairline.
+    hair_outer = [jag_fringe(c) for c in hair_outer]
 
     out_im = draw_smooth_fills(out_im, hair_outer)
     out_im = draw_smooth_fills(out_im, hair_holes, fill=(255, 255, 255))
     out_im = draw_smooth_fills(out_im, clothes_outer, fill=CLOTHES_FILL)
     out_im = draw_smooth_fills(out_im, clothes_holes, fill=(255, 255, 255))
+    out_im = draw_clothes_shading(out_im, clothes_only, gray)
     out_im = draw_smooth_strokes(out_im, silhouette_contours, width=outline_width)
     out_im = draw_smooth_strokes(out_im, hair_outer, width=outline_width)
     out_im = draw_smooth_strokes(out_im, hair_holes, width=outline_width)
     out_im = draw_smooth_strokes(out_im, clothes_outer, width=outline_width)
     out_im = draw_smooth_strokes(out_im, clothes_holes, width=outline_width)
+    out_im = draw_collar_hint(out_im, clothes_outer, detail_width)
     out_im = draw_hair_strands(out_im, hair_outer, detail_width=detail_width)
+    out_im = draw_hair_texture(out_im, hair_only, detail_width=detail_width)
 
     return np.array(out_im), foreground, gray, hair_clothes
 
@@ -711,6 +916,7 @@ def composite_line_art(photo_path: Path, out_path: Path):
     else:
         print("No face detected, skipping face structure lines and dot-eye replacement")
 
+    out, _ = crop_to_content(out, foreground)
     Image.fromarray(out).save(out_path)
     print(f"Saved to {out_path}")
 
@@ -748,7 +954,6 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
 
     connections = vision.FaceLandmarksConnections
     img = Image.fromarray(out)
-    draw = ImageDraw.Draw(img)
     line_width = max(1, detail_width - 1)
 
     def ordered_points(conns):
@@ -775,11 +980,22 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
 
     # Tapered (thick middle, thin ends) instead of a constant-width line --
     # matches the reference avatars' brush-stroke eyebrows rather than a
-    # uniform-diameter bar.
+    # uniform-diameter bar. Lifted slightly above their raw landmark
+    # position: on a subject wearing glasses whose frame sits high (at or
+    # above the natural brow line), the eyebrow line and the glasses' top
+    # rim can land close enough to visually merge into one line, making
+    # the eyebrows disappear. The reference avatars always show a clear
+    # gap between brow and glasses/eye regardless of the source photo, so
+    # a small fixed lift (proportional to eye spacing, not a guess) keeps
+    # that same separation instead of following the photo's geometry
+    # exactly.
+    eye_span = np.linalg.norm(
+        np.array([landmarks[263].x * w, landmarks[263].y * h]) - np.array([landmarks[33].x * w, landmarks[33].y * h])
+    )
+    brow_lift = eye_span * 0.08
     for conns in (connections.FACE_LANDMARKS_LEFT_EYEBROW, connections.FACE_LANDMARKS_RIGHT_EYEBROW):
-        pts = ordered_points(conns)
+        pts = [(px, py - brow_lift) for px, py in ordered_points(conns)]
         img = draw_tapered_stroke(img, pts, mid_width=detail_width + 1, end_width=max(1, detail_width - 2))
-    draw = ImageDraw.Draw(img)
 
     # Just the line under the nose (nostril hook to nostril hook), not the
     # full nose mesh (bridge + nostril wings + tip outline) -- matches the
@@ -798,9 +1014,10 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # tip, not a line spanning the full nostril-to-nostril width -- sample
     # only the middle portion of the same real spline (rather than a
     # separately-guessed shape) to shrink it down to that size while
-    # keeping its actual up-down-up-down curvature.
-    xs, ys = splev(np.linspace(0.32, 0.68, 24), tck)
-    draw.line(list(zip(xs, ys)), fill=(0, 0, 0), width=line_width, joint="curve")
+    # keeping its actual up-down-up-down curvature. Narrowed further (was
+    # 0.32-0.68) to match how minimal the reference nose marks actually are.
+    xs, ys = splev(np.linspace(0.4, 0.6, 16), tck)
+    img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
 
     # Mouth: a simple two-line smile, not the full lip outline -- an upper
     # curve through the real outer-lip landmarks (mouth corners to cupid's
@@ -812,12 +1029,12 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     upts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in upper_lip_idx])
     utck, _ = splprep([upts[:, 0], upts[:, 1]], s=0, k=3)
     uxs, uys = splev(np.linspace(0, 1, 40), utck)
-    draw.line(list(zip(uxs, uys)), fill=(0, 0, 0), width=line_width, joint="curve")
+    img = draw_smooth_open_stroke(img, list(zip(uxs, uys)), width=line_width)
 
     mouth_h = abs(landmarks[17].y - landmarks[0].y) * h
     lower_xs, lower_ys = splev(np.linspace(0.3, 0.7, 20), utck)
     lower_ys = np.array(lower_ys) + mouth_h * 0.55
-    draw.line(list(zip(lower_xs, lower_ys)), fill=(0, 0, 0), width=line_width, joint="curve")
+    img = draw_smooth_open_stroke(img, list(zip(lower_xs, lower_ys)), width=line_width)
 
     return np.array(img)
 
@@ -902,6 +1119,11 @@ def scaffold_composite(photo_path: Path, out_path: Path, mask_path: Path):
     locked = np.any(out != 255, axis=-1) & (cat_mask == FACE_SKIN)
     locked = ndimage.binary_dilation(locked, structure=disk(6))
     mask = (cat_mask == FACE_SKIN) & ~locked
+
+    # Crop scaffold and mask together, using the same bounds, so they stay
+    # pixel-aligned for generate_avatar_instantid.py's --control-image/--mask.
+    out, (top, bottom, left, right) = crop_to_content(out, foreground)
+    mask = mask[top:bottom, left:right]
 
     Image.fromarray(out).save(out_path)
     Image.fromarray((mask * 255).astype(np.uint8)).save(mask_path)
