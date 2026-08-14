@@ -1197,17 +1197,30 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # it read as one fluid stroke.
     from scipy.interpolate import splev, splprep
 
-    # Position, not shape, is the priority right now: this passes exactly
-    # through the real measured landmarks (nostril wings, tip, nostril
-    # wings), which is guaranteed correct since it's the actual photo's
-    # own geometry, not a reconstruction. Verified directly against a
-    # photo crop. Shape refinement (a boxier, stepped profile was traced
-    # repeatedly) should build on top of this baseline without moving it,
-    # rather than risk another position regression.
+    # Repeated traces show a boxier, "flat shelf - step - flat shelf"
+    # profile rather than a smooth arc. Built directly between each pair
+    # of real, consecutive landmarks (nostril wings, tip) rather than as
+    # a global spline or an independent baseline+template: each segment
+    # holds flat near both of its real landmark endpoints and transitions
+    # quickly between them in the middle. Because every hold point is one
+    # of the actual measured landmarks, this can't drift off-position the
+    # way the earlier reconstructions did -- position and shape are the
+    # same guarantee here, not two things that can go out of sync.
     nose_bottom_idx = [49, 129, 98, 2, 327, 358, 279]
     pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in nose_bottom_idx])
-    tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
-    xs, ys = splev(np.linspace(0.0, 1.0, 30), tck)
+    xs_list, ys_list = [], []
+    hold_lo, hold_hi = 0.30, 0.70
+    for i in range(len(pts) - 1):
+        p0, p1 = pts[i], pts[i + 1]
+        n = 12
+        t = np.linspace(0.0, 1.0, n, endpoint=(i == len(pts) - 2))
+        seg_x = p0[0] + t * (p1[0] - p0[0])
+        u = np.clip((t - hold_lo) / (hold_hi - hold_lo), 0.0, 1.0)
+        smooth_u = 3 * u**2 - 2 * u**3
+        seg_y = p0[1] + smooth_u * (p1[1] - p0[1])
+        xs_list.append(seg_x)
+        ys_list.append(seg_y)
+    xs, ys = np.concatenate(xs_list), np.concatenate(ys_list)
     img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
 
     # A short philtrum tick between nose and mouth -- the reference style
