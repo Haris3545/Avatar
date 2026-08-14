@@ -37,8 +37,10 @@ Usage:
 """
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 MODEL = "haris3545/face-to-many-patched:212d4f36ac8fd39c2e9b32a2b7279008a1216d51fa8c7aa3eae491fb1f10e846"
@@ -142,6 +144,55 @@ def crop_to_shoulders(path: Path, margin_fraction: float = 0.12) -> None:
             )
 
     im.crop((left, top, right, new_bottom)).save(path)
+
+
+def align_style_to_control(style_path: Path, control_path: Path) -> Path:
+    """Warp style_path (e.g. Gemini's free-form output) onto control_path's
+    exact pixel coordinate frame before it's used as --style-image.
+
+    Without this, the two images only share a canvas by ImageResize+ fitting
+    each into the same 1024x1024 box independently -- their faces end up at
+    different positions/scales within it, since Gemini composes its own
+    framing rather than literally matching the scaffold pixel-for-pixel. The
+    inpaint mask is built in control_image's coordinate space, so applying it
+    to a style_image whose face doesn't line up produces double-exposure
+    ghosting in the generated region (two differently-positioned faces
+    blended together), not a style/quality problem. Fit a similarity
+    transform (rotation+scale+translation, no shear) from outer-eye-corner +
+    chin landmarks -- points present in both a photoreal render and Gemini's
+    stylized line art -- and warp style_path into control_path's frame so the
+    mask actually lines up with what it's masking.
+    """
+    import composite_line_art as cla
+    import cv2
+
+    control_im = Image.open(control_path).convert("RGB")
+    style_im = Image.open(style_path).convert("RGB")
+
+    control_lm = cla.get_face_landmarks(control_im)
+    style_lm = cla.get_face_landmarks(style_im)
+    if control_lm is None or style_lm is None:
+        print(
+            "Warning: couldn't detect a face in the scaffold and/or style image -- "
+            "uploading style_image unaligned, which risks ghosting."
+        )
+        return style_path
+
+    idxs = [33, 263, 152]  # right eye outer corner, left eye outer corner, chin
+    cw, ch = control_im.size
+    sw, sh = style_im.size
+    dst = np.array([[control_lm[i].x * cw, control_lm[i].y * ch] for i in idxs], dtype=np.float32)
+    src = np.array([[style_lm[i].x * sw, style_lm[i].y * sh] for i in idxs], dtype=np.float32)
+
+    transform, _ = cv2.estimateAffinePartial2D(src, dst)
+    warped = cv2.warpAffine(
+        np.array(style_im), transform, (cw, ch),
+        flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REPLICATE,
+    )
+
+    out_path = Path(tempfile.mkdtemp()) / f"{style_path.stem}_aligned.png"
+    Image.fromarray(warped).save(out_path)
+    return out_path
 
 
 def main():
@@ -343,6 +394,8 @@ def main():
         style_path = Path(args.style_image)
         if not style_path.exists():
             sys.exit(f"Style image not found: {style_path}")
+        print("Aligning style image to scaffold's face position/scale...")
+        style_path = align_style_to_control(style_path, control_path)
         print("Uploading style image...")
         with open(style_path, "rb") as f:
             uploaded_style = replicate.files.create(f)
