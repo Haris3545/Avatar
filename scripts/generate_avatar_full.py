@@ -57,6 +57,14 @@ def main():
         "drift; higher corrects harder but erases more of Gemini's contribution. Untested -- "
         "expect to need a few runs at different values to find what works.",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="regenerate the scaffold/mask and Gemini draft even if they already exist from a "
+        "previous run. Off by default: re-running after only the final merge step failed (e.g. "
+        "to retry --style-denoise at a different value) shouldn't have to wait through steps "
+        "1-2 again, since neither depends on anything the merge step changes.",
+    )
     args = parser.parse_args()
 
     if args.glasses and args.no_glasses:
@@ -77,27 +85,33 @@ def main():
     gemini_path = work_dir / f"{stem}_gemini.png"
     out_path = Path(args.out) if args.out else work_dir / f"{stem}_avatar.png"
 
-    composite_cmd = [
-        sys.executable, str(ROOT / "scripts" / "composite_line_art.py"),
-        str(photo_path), str(scaffold_path), "--scaffold",
-    ]
-    if args.glasses:
-        composite_cmd.append("--glasses")
-    run(composite_cmd, "Step 1/3: classical structure scaffold")
+    if not args.force and scaffold_path.exists() and mask_path.exists():
+        print(f"\n=== Step 1/3: classical structure scaffold ===\nSkipping -- {scaffold_path} and {mask_path} already exist (pass --force to regenerate)")
+    else:
+        composite_cmd = [
+            sys.executable, str(ROOT / "scripts" / "composite_line_art.py"),
+            str(photo_path), str(scaffold_path), "--scaffold",
+        ]
+        if args.glasses:
+            composite_cmd.append("--glasses")
+        run(composite_cmd, "Step 1/3: classical structure scaffold")
 
-    gemini_cmd = [
-        sys.executable, str(ROOT / "scripts" / "generate_avatar_gemini.py"),
-        str(photo_path), "--out", str(gemini_path),
-    ]
-    if args.glasses:
-        gemini_cmd.append("--glasses")
-    if args.no_glasses:
-        gemini_cmd.append("--no-glasses")
-    if args.beard:
-        gemini_cmd.append("--beard")
-    if args.no_beard:
-        gemini_cmd.append("--no-beard")
-    run(gemini_cmd, "Step 2/3: Gemini style draft")
+    if not args.force and gemini_path.exists():
+        print(f"\n=== Step 2/3: Gemini style draft ===\nSkipping -- {gemini_path} already exists (pass --force to regenerate)")
+    else:
+        gemini_cmd = [
+            sys.executable, str(ROOT / "scripts" / "generate_avatar_gemini.py"),
+            str(photo_path), "--out", str(gemini_path),
+        ]
+        if args.glasses:
+            gemini_cmd.append("--glasses")
+        if args.no_glasses:
+            gemini_cmd.append("--no-glasses")
+        if args.beard:
+            gemini_cmd.append("--beard")
+        if args.no_beard:
+            gemini_cmd.append("--no-beard")
+        run(gemini_cmd, "Step 2/3: Gemini style draft")
 
     instantid_cmd = [
         sys.executable, str(ROOT / "scripts" / "generate_avatar_instantid.py"),
