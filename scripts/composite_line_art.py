@@ -68,8 +68,8 @@ BACKGROUND, HAIR, BODY_SKIN, FACE_SKIN, CLOTHES, OTHER = range(6)
 # weight for interior facial detail (eyebrows, nose, mouth, eyes, glasses).
 # Centralized here instead of a magic number at each call site so the two
 # bands stay in sync as the style gets tuned.
-OUTLINE_WIDTH = 7
-DETAIL_WIDTH = 5
+OUTLINE_WIDTH = 5
+DETAIL_WIDTH = 3
 # The widths above were tuned by eye against a ~900px-tall photo. Source
 # headshots range from 200px thumbnails to 1300px photos, and a fixed pixel
 # width doesn't track that: on a small photo the face (and especially small
@@ -81,11 +81,12 @@ WIDTH_REFERENCE_PX = 900
 
 CLOTHES_FILL = (55, 55, 55)
 CLOTHES_SHADOW_FILL = (35, 35, 35)
-# Hair is a flat mid-grey (not solid black) covered in dense directional
-# hatching strokes in the reference avatars -- lighter than clothing, with
-# the hatching itself drawn darker than the fill for contrast.
-HAIR_FILL = (110, 110, 110)
-HAIR_TEXTURE_COLOR = (35, 35, 35)
+# Default/fallback only -- _base_layers computes an actual hair fill per
+# photo from the subject's real measured hair darkness (see hair_fill in
+# _base_layers). No reference avatar uses a universal tone or dense
+# interior hatching regardless of the subject's real hair color; this
+# constant only matters if hair_only ends up empty.
+HAIR_FILL = (30, 30, 30)
 
 
 def stroke_scale(w: int, h: int) -> float:
@@ -198,19 +199,22 @@ def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
         clear_r = eye_width * 0.75
         draw.ellipse([cx - clear_r, cy - clear_r * 0.7, cx + clear_r, cy + clear_r * 0.7], fill=(255, 255, 255))
 
-        # Pupil: solid dot
-        pupil_r = max(eye_width * 0.13, 3)
+        # Pupil: solid dot -- small and subtle (shrunk from an earlier,
+        # noticeably larger version that read as cartoonish/doll-eyed
+        # next to the confirmed reference style's small, easy-to-miss eyes).
+        pupil_r = max(eye_width * 0.08, 2)
         img = draw_smooth_dot(img, cx, cy, pupil_r)
 
         # Upper eyelid: single arc spanning the eye corners, curving
         # upward above the pupil -- sampled as points along the ellipse
         # so it can go through the same open-stroke helper as everything
-        # else instead of PIL's unaliased native arc.
-        arc_left = min(p1[0], p2[0]) - eye_width * 0.08
-        arc_right = max(p1[0], p2[0]) + eye_width * 0.08
-        arc_top = cy - eye_width * 0.45
-        arc_bottom = cy + eye_width * 0.15
-        stroke_w = max(eye_width * 0.09, 2)
+        # else instead of PIL's unaliased native arc. Shallower/smaller
+        # than an earlier version, same reasoning as the pupil above.
+        arc_left = min(p1[0], p2[0]) - eye_width * 0.05
+        arc_right = max(p1[0], p2[0]) + eye_width * 0.05
+        arc_top = cy - eye_width * 0.28
+        arc_bottom = cy + eye_width * 0.08
+        stroke_w = max(eye_width * 0.06, 1.5)
         angles = np.radians(np.linspace(200, 340, 24))
         acx, acy = (arc_left + arc_right) / 2, (arc_top + arc_bottom) / 2
         arx, ary = (arc_right - arc_left) / 2, (arc_bottom - arc_top) / 2
@@ -464,48 +468,6 @@ def jag_fringe(contour: np.ndarray, n_teeth: int = 6, depth_frac: float = 0.035)
     result[band, 1] = result[band, 1] - depth * teeth
     return result
 
-
-def draw_hair_texture(canvas: Image.Image, hair_only: np.ndarray, detail_width: float, n_marks: int = 28, seed: int = 7) -> Image.Image:
-    """Dense directional hatching strokes layered over the flat mid-grey
-    hair fill -- the reference avatars draw hair as strand-by-strand
-    linework (many individual strokes describing the actual hair flow,
-    like hand-inked hatching), not a flat silhouette with a couple of
-    accent marks. n_marks raised from an earlier "a handful of accents"
-    version (6) to actually read as hatching density. Positions are
-    sampled with a fixed seed so re-runs on the same photo are
-    reproducible, and confined to the hair mask's own middle band so they
-    don't crowd the crown (already marked by draw_hair_strands) or the
-    very edge."""
-    ys, xs = np.where(hair_only)
-    if ys.size == 0:
-        return canvas
-    top_y, bottom_y = ys.min(), ys.max()
-    bbox_h = bottom_y - top_y
-    band = (ys > top_y + bbox_h * 0.1) & (ys < top_y + bbox_h * 0.9)
-    ys_b, xs_b = ys[band], xs[band]
-    if ys_b.size < n_marks:
-        n_marks = ys_b.size
-    if n_marks == 0:
-        return canvas
-
-    rng = np.random.default_rng(seed)
-    idxs = rng.choice(ys_b.size, size=n_marks, replace=False)
-    for i in idxs:
-        bx, by = float(xs_b[i]), float(ys_b[i])
-        # Roughly downward-flowing direction (hair falls from the crown),
-        # with a per-mark spread so they don't all read as parallel --
-        # and a per-mark length so hatching has natural variation instead
-        # of a uniform comb pattern. Floored by detail_width, not just a
-        # fraction of the hair region's own height: short/buzzed hair has
-        # a thin bbox_h, and a purely proportional length degenerates into
-        # dots too small to read as directional strokes at all.
-        length = max(bbox_h * rng.uniform(0.04, 0.11), detail_width * 2.5)
-        angle = np.pi / 2 + rng.uniform(-0.4, 0.4)
-        dx, dy = np.cos(angle), np.sin(angle)
-        tip = (bx + dx * length, by + dy * length)
-        canvas = draw_pointed_stroke(
-            canvas, [(bx, by), tip], base_width=max(1, detail_width * 0.35), fill=HAIR_TEXTURE_COLOR
-        )
 
     return canvas
 
@@ -835,7 +797,17 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     # smooth spline-fit edge, matching the reference avatars' hairline.
     hair_outer = [jag_fringe(c) for c in hair_outer]
 
-    out_im = draw_smooth_fills(out_im, hair_outer, fill=HAIR_FILL)
+    # Hair fill tracks this specific photo's actual hair darkness instead
+    # of a fixed tone -- none of the reference avatars use a universal
+    # grey; a lighter-haired subject gets a lighter fill and a dark-haired
+    # subject (like most of the reference library, Greg included) gets
+    # solid near-black, same as they'd photograph.
+    hair_fill = HAIR_FILL
+    if hair_only.any():
+        hair_gray = gray[hair_only].mean()
+        hair_fill = tuple(int(v) for v in np.clip([hair_gray * 0.55] * 3, 15, 165))
+
+    out_im = draw_smooth_fills(out_im, hair_outer, fill=hair_fill)
     out_im = draw_smooth_fills(out_im, hair_holes, fill=(255, 255, 255))
     out_im = draw_smooth_fills(out_im, clothes_outer, fill=CLOTHES_FILL)
     out_im = draw_smooth_fills(out_im, clothes_holes, fill=(255, 255, 255))
@@ -847,40 +819,13 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     out_im = draw_smooth_strokes(out_im, clothes_holes, width=outline_width)
     out_im = draw_collar_hint(out_im, clothes_outer, detail_width)
     out_im = draw_hair_strands(out_im, hair_outer, detail_width=detail_width)
-    out_im = draw_hair_texture(out_im, hair_only, detail_width=detail_width)
+    # No dense interior hatching: none of the reference avatars actually
+    # use it (that was a misreading of a couple of naturally lighter-
+    # haired references) -- a handful of crown tufts from
+    # draw_hair_strands above is the full extent of hair texture in the
+    # house style, not additional hatching strokes across the whole mass.
 
     return np.array(out_im), foreground, gray, hair_clothes
-
-
-def draw_glasses_sparkle(canvas: Image.Image, glasses_outer, detail_width: float) -> Image.Image:
-    """A couple of small diagonal reflection/sparkle ticks near one upper
-    lens corner -- a flourish the reference avatars use on glasses that
-    a plain outlined frame doesn't have. Only the single largest contour
-    (the main frame) gets the mark, not every piece (the bridge, a
-    separate lens if they didn't merge) -- the reference avatars only
-    ever show this near one corner, not scattered across the frame."""
-    if not glasses_outer:
-        return canvas
-
-    contour = max(
-        glasses_outer,
-        key=lambda c: (c[:, 0].max() - c[:, 0].min()) * (c[:, 1].max() - c[:, 1].min()),
-    )
-    top_y = contour[:, 1].min()
-    bbox_h = contour[:, 1].max() - top_y
-    band = contour[contour[:, 1] < top_y + bbox_h * 0.35]
-    if len(band) == 0:
-        return canvas
-
-    ax, ay = band[np.argmax(band[:, 0])]
-    length = bbox_h * 0.16
-    for offset in (0.0, 0.4):
-        x0 = ax + bbox_h * 0.08 + offset * length
-        y0 = ay - bbox_h * 0.1 - offset * length * 0.3
-        x1, y1 = x0 + length * 0.5, y0 - length * 0.5
-        canvas = draw_smooth_open_stroke(canvas, [(x0, y0), (x1, y1)], width=max(1, detail_width - 2))
-
-    return canvas
 
 
 def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.ndarray, foreground: np.ndarray, landmarks, detail_width: float = DETAIL_WIDTH, scale: float = 1.0, glasses: bool = False) -> Image.Image:
@@ -967,7 +912,11 @@ def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.nd
         )
         out_im = draw_smooth_strokes(out_im, glasses_outer, width=detail_width)
         out_im = draw_smooth_strokes(out_im, glasses_holes, width=detail_width)
-        out_im = draw_glasses_sparkle(out_im, glasses_outer, detail_width)
+        # No sparkle/reflection tick flourish here (a prior version added
+        # one): the confirmed target reference style is a sparse, minimal
+        # sketch, and extra flourish marks cut against "as few strokes as
+        # possible" -- unclear the sparkle convention even belongs to this
+        # substyle rather than the denser one it was drawn from.
 
     return out_im
 
@@ -1073,13 +1022,13 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
         np.array([landmarks[263].x * w, landmarks[263].y * h]) - np.array([landmarks[33].x * w, landmarks[33].y * h])
     )
     brow_lift = eye_span * 0.08
-    # Thick and only lightly tapered -- the reference avatars draw eyebrows
-    # as a bold, almost-solid flat shape, closer to a small filled polygon
-    # than a thin stroke. end_width close to mid_width keeps most of the
-    # shape's width instead of tapering down to a thin point at each end.
+    # Thin, only lightly tapered -- the confirmed reference style draws
+    # eyebrows as a single simple curved stroke, not a thick filled shape
+    # (an earlier version of this went bold/flat based on a different,
+    # non-representative pair of avatars -- reverted).
     for conns in (connections.FACE_LANDMARKS_LEFT_EYEBROW, connections.FACE_LANDMARKS_RIGHT_EYEBROW):
         pts = [(px, py - brow_lift) for px, py in ordered_points(conns)]
-        img = draw_tapered_stroke(img, pts, mid_width=detail_width * 2.2, end_width=detail_width * 1.4)
+        img = draw_tapered_stroke(img, pts, mid_width=detail_width + 1, end_width=max(1, detail_width - 1))
 
     # Just the line under the nose (nostril hook to nostril hook), not the
     # full nose mesh (bridge + nostril wings + tip outline) -- matches the
