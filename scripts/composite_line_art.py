@@ -1239,9 +1239,11 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # (not just the lower lip) sitting about 5% of eye_span too high here
     # versus its actual position -- shift both lines down by that amount
     # rather than just the landmarks' raw position.
-    # A second round of direct correction traced the mouth still sitting
-    # too high after the first 0.05 fix -- moved further down.
-    mouth_shift = eye_span * 0.09
+    # A second correction (0.09) was measured against a stale, unshifted
+    # reference overlay and effectively double-counted the shift; a third
+    # round, measured against the actually-corrected overlay, showed 0.09
+    # overshooting by ~8px -- landing much closer to the original 0.05.
+    mouth_shift = eye_span * 0.005
     upper_lip_idx = [61, 40, 37, 0, 267, 270, 291]
     upts = np.array([(landmarks[i].x * w, landmarks[i].y * h + mouth_shift) for i in upper_lip_idx])
     utck, _ = splprep([upts[:, 0], upts[:, 1]], s=0, k=3)
