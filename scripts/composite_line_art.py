@@ -1242,8 +1242,10 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # A second correction (0.09) was measured against a stale, unshifted
     # reference overlay and effectively double-counted the shift; a third
     # round, measured against the actually-corrected overlay, showed 0.09
-    # overshooting by ~8px -- landing much closer to the original 0.05.
-    mouth_shift = eye_span * 0.005
+    # overshooting by ~8px. A fourth round then showed the corrected 0.005
+    # undershooting by ~6px -- these two clean measurements converge on
+    # 0.07, close to the original pre-session value of 0.05.
+    mouth_shift = eye_span * 0.07
     upper_lip_idx = [61, 40, 37, 0, 267, 270, 291]
     upts = np.array([(landmarks[i].x * w, landmarks[i].y * h + mouth_shift) for i in upper_lip_idx])
     utck, _ = splprep([upts[:, 0], upts[:, 1]], s=0, k=3)
