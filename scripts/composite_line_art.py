@@ -1239,18 +1239,21 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     philtrum_bottom = (landmarks[2].x * w, nose_center_y + gap + philtrum_len)
     img = draw_smooth_open_stroke(img, [philtrum_top, philtrum_bottom], width=max(1, line_width - 1))
 
-    # Mouth: a closed smile with real structure -- an upper curve through
-    # the real outer-lip landmarks (mouth corners to cupid's bow), plus a
-    # shorter lower-lip line beneath it, offset from the upper curve's own
-    # midsection rather than a second set of guessed landmark indices, so
-    # it can't drift out of proportion to the mouth width/height this
-    # specific face actually measured. An earlier, overly-minimized
-    # version of this read as flat/expressionless -- these two lines are
-    # the confirmed minimum for the mouth to still read as a smile.
+    # Mouth: a single curve through the real outer-lip landmarks (mouth
+    # corners to cupid's bow). An earlier version added a second, shorter
+    # "lower lip" line -- the same curve's own midsection duplicated and
+    # shifted straight down -- meant to keep the mouth from reading as
+    # flat/expressionless. In practice that fabricated segment created a
+    # downward-pointing dip in the center that made the whole mouth read
+    # as a frown on a photo that isn't one, even though the underlying
+    # landmark curve itself is fine (this subject's real upper-lip curve
+    # is close to level, i.e. a relaxed smile, not deeply arced either
+    # way) -- removed rather than patched again, since the real fix is to
+    # not draw a line that has no basis in actual landmark geometry.
     # A direct correction against a real photo measured the whole mouth
-    # (not just the lower lip) sitting about 5% of eye_span too high here
-    # versus its actual position -- shift both lines down by that amount
-    # rather than just the landmarks' raw position.
+    # sitting about 5% of eye_span too high here versus its actual
+    # position -- shift it down by that amount rather than just the
+    # landmarks' raw position.
     # A second correction (0.09) was measured against a stale, unshifted
     # reference overlay and effectively double-counted the shift; a third
     # round, measured against the actually-corrected overlay, showed 0.09
@@ -1263,11 +1266,6 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     utck, _ = splprep([upts[:, 0], upts[:, 1]], s=0, k=3)
     uxs, uys = splev(np.linspace(0, 1, 40), utck)
     img = draw_smooth_open_stroke(img, list(zip(uxs, uys)), width=line_width)
-
-    mouth_h = abs(landmarks[17].y - landmarks[0].y) * h
-    lower_xs, lower_ys = splev(np.linspace(0.3, 0.7, 20), utck)
-    lower_ys = np.array(lower_ys) + mouth_h * 0.55
-    img = draw_smooth_open_stroke(img, list(zip(lower_xs, lower_ys)), width=line_width)
 
     return np.array(img)
 
