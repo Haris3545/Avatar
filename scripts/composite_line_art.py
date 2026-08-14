@@ -827,7 +827,20 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     clothes_outer, clothes_holes = smooth_contours(
         clothes_only, min_area_frac=0.001, include_holes=True, smoothing=1.5
     )
-    silhouette_contours = smooth_contours(foreground, smoothing=1.5)
+    # Unlike hair_only/clothes_only just above, this is rembg's own
+    # foreground cutout, not the segmenter's category mask -- rembg is
+    # trained specifically for clean person cutouts, so it stays reliable
+    # even against a noisy background (e.g. a chalkboard) where the
+    # category segmenter's hair boundary genuinely isn't. That means the
+    # jaw/cheek edge here is real measured shape, not segmentation noise --
+    # it's the single feature most responsible for an avatar actually
+    # looking like this specific person (per repeated feedback that jaw
+    # shape is where most of the likeness lives), so it shouldn't get the
+    # same heavy denoising smoothing the genuinely-noisy hair/clothes
+    # edges need. A much lighter pass here still removes pixel jaggedness
+    # without spline-averaging away a jaw angle or chin point into a
+    # generic oval.
+    silhouette_contours = smooth_contours(foreground, smoothing=0.3)
     # A jagged/tufted fringe (see jag_fringe) instead of hair's otherwise
     # smooth spline-fit edge, matching the reference avatars' hairline.
     hair_outer = [jag_fringe(c) for c in hair_outer]
