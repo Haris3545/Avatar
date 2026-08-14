@@ -1197,23 +1197,20 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # it read as one fluid stroke.
     from scipy.interpolate import splev, splprep
 
-    nose_bottom_idx = [49, 129, 98, 2, 327, 358, 279]
     # A direct correction against a real photo traced the whole nose sitting
     # a few px too low here versus its actual position -- shift it up.
     nose_shift = -eye_span * 0.045
+    # A gull-wing shape through all 7 raw landmarks (49, 129, 98, 2, 327,
+    # 358, 279) was traced against a real photo as visibly wrong -- the
+    # actual nose reads as one smooth, evenly-rounded arc with no kink or
+    # flat spot at the center, not two hooks either side of a dip. Using
+    # just the two nostril-wing corners and the tip gives a quadratic
+    # spline that's smooth by construction (no intermediate landmarks to
+    # introduce the kinks the gull-wing shape had).
+    nose_bottom_idx = [49, 2, 279]
     pts = np.array([(landmarks[i].x * w, landmarks[i].y * h + nose_shift) for i in nose_bottom_idx])
-    tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
-    # Reference avatars mark the nose with a small two-nostril "gull-wing"
-    # mark -- two visible hooks either side of a shallow center dip, not
-    # a flat/straight line. The actual hook shape lives in the OUTER
-    # portion of this spline's parameter range (near landmarks 49/279,
-    # the real nostril wing corners) -- a narrow central crop (previous
-    # versions used 0.44-0.56, then 0.34-0.66) keeps only the flattest
-    # part near the tip (landmark 2, at u=0.5) and cuts away exactly the
-    # hooks that make it read as a nose, leaving a near-straight line
-    # that combined with the philtrum tick below reads as a vertical
-    # "bridge" instead. Widened to actually include the hooks.
-    xs, ys = splev(np.linspace(0.15, 0.85, 24), tck)
+    tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=2)
+    xs, ys = splev(np.linspace(0.0, 1.0, 24), tck)
     img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
 
     # A short philtrum tick between nose and mouth -- the reference style
