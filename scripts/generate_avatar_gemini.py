@@ -437,13 +437,22 @@ def main():
             print("Warning: no face detected for measurements -- skipping numeric proportions.")
 
     def extract_image(response):
+        """Returns a PIL Image, or None if this response didn't produce one
+        (e.g. finish_reason=IMAGE_OTHER -- an occasional one-off failure to
+        generate, not a code bug) -- printing why, so the caller can retry/
+        skip instead of the whole run crashing on a single flaky call."""
+        if not response.candidates or response.candidates[0].content is None:
+            reason = response.candidates[0].finish_reason if response.candidates else "no candidates"
+            print(f"  No image in response (finish_reason={reason}) -- skipping this sample.")
+            return None
         for part in response.candidates[0].content.parts:
             if getattr(part, "inline_data", None) is not None:
                 from io import BytesIO
 
                 return Image.open(BytesIO(part.inline_data.data))
         text = "".join(part.text for part in response.candidates[0].content.parts if getattr(part, "text", None))
-        sys.exit(f"No image returned. Model response:\n{text}")
+        print(f"  No image in response -- skipping this sample. Model said:\n{text}")
+        return None
 
     print(f"Loading {len(reference_paths)} reference avatar(s)...")
     out_path = Path(args.out)
@@ -463,6 +472,8 @@ def main():
         print(f"Generating with {args.model} (sample {i}/{args.samples})...")
         response = client.models.generate_content(model=args.model, contents=contents, config=config)
         image = extract_image(response)
+        if image is None:
+            continue
 
         if args.samples == 1:
             sample_path = out_path
@@ -478,6 +489,9 @@ def main():
             status = "PASS" if passed else "FAIL"
             print(f"  QA {status}: {checks}")
         results.append((sample_path, passed, checks))
+
+    if not results:
+        sys.exit(f"All {args.samples} sample(s) failed to generate an image -- see warnings above. Try again.")
 
     if args.samples > 1:
         print("\nSummary:")
