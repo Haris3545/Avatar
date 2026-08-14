@@ -591,9 +591,26 @@ def draw_clothes_shading(canvas: Image.Image, clothes_only: np.ndarray, gray: np
     vals = gray[clothes_only]
     if vals.size < 50:
         return canvas
-    median = np.median(vals)
-    dark_clothes = clothes_only & (gray <= median)
-    dark_contours = smooth_contours(dark_clothes, min_area_frac=0.004, smoothing=1.2)
+
+    # Splitting on the raw per-pixel gray value picks up fabric texture/
+    # pattern at full resolution (every fold, every weave highlight),
+    # which produces a chaotic scatter of tiny regions instead of one
+    # clean "shadow side" shape -- blur heavily first (relative to the
+    # clothing region's own size) so only the large-scale lighting
+    # gradient survives, then clean up the resulting binary mask before
+    # tracing it.
+    ys, xs = np.where(clothes_only)
+    region_size = max(ys.max() - ys.min(), xs.max() - xs.min(), 1)
+    sigma = max(region_size * 0.08, 5)
+    blurred = ndimage.gaussian_filter(gray, sigma=sigma)
+
+    median = np.median(blurred[clothes_only])
+    dark_clothes = clothes_only & (blurred <= median)
+    cleanup = disk(max(int(sigma), 2))
+    dark_clothes = ndimage.binary_closing(dark_clothes, structure=cleanup)
+    dark_clothes = ndimage.binary_opening(dark_clothes, structure=cleanup)
+
+    dark_contours = smooth_contours(dark_clothes, min_area_frac=0.01, smoothing=2.0)
     return draw_smooth_fills(canvas, dark_contours, fill=CLOTHES_SHADOW_FILL)
 
 
