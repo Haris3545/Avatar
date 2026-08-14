@@ -1139,15 +1139,6 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     lower_ys = np.array(lower_ys) + mouth_h * 0.55
     img = draw_smooth_open_stroke(img, list(zip(lower_xs, lower_ys)), width=line_width)
 
-    # Chin crease (mentolabial sulcus): a short curved mark below the
-    # lower lip separating the chin from the lip, giving the chin actual
-    # volume/shape instead of leaving it as bare unmarked skin down to the
-    # jaw outline. Missing from earlier versions despite being present in
-    # the user's own reference trace.
-    chin_xs, chin_ys = splev(np.linspace(0.35, 0.65, 20), utck)
-    chin_ys = np.array(chin_ys) + mouth_h * 1.3
-    img = draw_smooth_open_stroke(img, list(zip(chin_xs, chin_ys)), width=max(1, line_width - 1))
-
     return np.array(img)
 
 
