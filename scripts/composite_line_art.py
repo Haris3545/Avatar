@@ -94,18 +94,51 @@ def stroke_scale(w: int, h: int) -> float:
 
 
 def crop_to_content(out: np.ndarray, foreground: np.ndarray, margin_frac: float = 0.08) -> tuple:
-    """Crop the canvas to the subject's own bounding box plus a margin,
-    instead of leaving whatever headroom/framing the source photo happened
-    to have -- the reference avatars crop tight and bold, filling most of
-    the frame, while our output was leaving noticeably more empty white
-    space above the head. Returns the crop bounds too, so a caller with a
-    second same-size array (scaffold_composite's mask) can apply the exact
-    same crop and stay pixel-aligned."""
+    """Crop the canvas to the subject's own bounding box plus a margin --
+    trimming excess headroom above the head -- and then to just below the
+    shoulders, instead of leaving whatever headroom/torso framing the
+    source photo happened to have. The reference avatars crop tight and
+    bold, head-and-shoulders only, filling most of the frame.
+
+    The shoulder cut uses the subject's own silhouette width profile
+    (same approach as generate_avatar_instantid.py's crop_to_shoulders):
+    find the neck (the narrowest point below the head), then the
+    shoulder line (where the silhouette widens back out to full body
+    width below that), and crop a small margin below it. A fixed height
+    fraction doesn't work here since how far down the shoulders fall
+    relative to the head varies photo to photo.
+
+    Returns the crop bounds too, so a caller with a second same-size
+    array (scaffold_composite's mask) can apply the exact same crop and
+    stay pixel-aligned."""
     ys, xs = np.where(foreground)
     if ys.size == 0:
         return out, (0, out.shape[0], 0, out.shape[1])
     y0, y1 = int(ys.min()), int(ys.max())
     x0, x1 = int(xs.min()), int(xs.max())
+    content_height = y1 - y0
+
+    any_row = foreground.any(axis=1)
+    first_idx = foreground.argmax(axis=1)
+    last_idx = foreground.shape[1] - 1 - foreground[:, ::-1].argmax(axis=1)
+    widths = np.where(any_row, last_idx - first_idx, 0)
+
+    search_start = y0 + int(content_height * 0.35)
+    search_end = min(y0 + int(content_height * 0.85), y1)
+    fallback_bottom = min(y0 + int(content_height * 0.72), out.shape[0] - 1)
+    shoulder_bottom = fallback_bottom
+    if search_start < search_end:
+        neck_y = search_start + int(np.argmin(widths[search_start:search_end]))
+        below = widths[neck_y : y1 + 1]
+        shoulder_width = below.max() if below.size else 0
+        if shoulder_width > widths[neck_y]:
+            threshold = widths[neck_y] + (shoulder_width - widths[neck_y]) * 0.85
+            candidates = np.where(below >= threshold)[0]
+            if candidates.size:
+                shoulder_y = neck_y + int(candidates[0])
+                shoulder_bottom = min(shoulder_y + int(content_height * margin_frac), out.shape[0] - 1)
+    y1 = min(shoulder_bottom, y1)
+
     my = int((y1 - y0) * margin_frac)
     mx = int((x1 - x0) * margin_frac)
     top = max(y0 - my, 0)
@@ -205,30 +238,16 @@ def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
         pupil_r = max(eye_width * 0.08, 2)
         img = draw_smooth_dot(img, cx, cy, pupil_r)
 
-        # Upper eyelid: single arc spanning the eye corners, curving
-        # upward above the pupil -- sampled as points along the ellipse
-        # so it can go through the same open-stroke helper as everything
-        # else instead of PIL's unaliased native arc. Shallower/smaller
-        # than an earlier version, same reasoning as the pupil above.
-        arc_left = min(p1[0], p2[0]) - eye_width * 0.05
-        arc_right = max(p1[0], p2[0]) + eye_width * 0.05
-        arc_top = cy - eye_width * 0.28
-        arc_bottom = cy + eye_width * 0.08
-        stroke_w = max(eye_width * 0.06, 1.5)
-        angles = np.radians(np.linspace(200, 340, 24))
-        acx, acy = (arc_left + arc_right) / 2, (arc_top + arc_bottom) / 2
-        arx, ary = (arc_right - arc_left) / 2, (arc_bottom - arc_top) / 2
-        arc_points = list(zip(acx + arx * np.cos(angles), acy + ary * np.sin(angles)))
-        img = draw_smooth_open_stroke(img, arc_points, width=stroke_w)
-
-        # A short downward hook at the arc's outer corner reads as an
-        # eyelash flick, matching the reference avatars -- without it the
-        # eye is just a bare arc + dot, which looks slightly blank/flat.
-        outer_x = arc_left if p1[0] < p2[0] else arc_right
-        hook_end_x = outer_x - eye_width * 0.1 if p1[0] < p2[0] else outer_x + eye_width * 0.1
-        hook_y = cy - eye_width * 0.1
-        img = draw_smooth_open_stroke(img, [(outer_x, hook_y), (hook_end_x, hook_y + eye_width * 0.12)], width=stroke_w)
-        draw = ImageDraw.Draw(img)
+        # Upper eyelid: a short, thick horizontal tick directly above the
+        # pupil -- not a long thin arc spanning the whole eye corner-to-
+        # corner (an earlier version). The confirmed reference style
+        # marks the eyelid with a small, noticeably thick stroke right
+        # over the eyeball, distinct in both length and weight from the
+        # thin eyebrow further above it.
+        lid_half_w = eye_width * 0.16
+        lid_y = cy - eye_width * 0.22
+        lid_w = max(eye_width * 0.18, 2)
+        img = draw_smooth_open_stroke(img, [(cx - lid_half_w, lid_y), (cx + lid_half_w, lid_y)], width=lid_w)
 
     return np.array(img)
 
@@ -1065,21 +1084,27 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in nose_bottom_idx])
     tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
     # Reference avatars mark the nose with a small two-nostril "gull-wing"
-    # mark -- clearly present, not reduced to invisibility. An earlier,
-    # more aggressively-shrunk version (0.44-0.56) overshot into "barely
-    # there"; this brings it back to a real, visible shape while still
-    # sampling only the middle portion (not the full nostril-to-nostril
-    # width the raw landmarks span).
-    xs, ys = splev(np.linspace(0.34, 0.66, 20), tck)
+    # mark -- two visible hooks either side of a shallow center dip, not
+    # a flat/straight line. The actual hook shape lives in the OUTER
+    # portion of this spline's parameter range (near landmarks 49/279,
+    # the real nostril wing corners) -- a narrow central crop (previous
+    # versions used 0.44-0.56, then 0.34-0.66) keeps only the flattest
+    # part near the tip (landmark 2, at u=0.5) and cuts away exactly the
+    # hooks that make it read as a nose, leaving a near-straight line
+    # that combined with the philtrum tick below reads as a vertical
+    # "bridge" instead. Widened to actually include the hooks.
+    xs, ys = splev(np.linspace(0.15, 0.85, 24), tck)
     img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
 
     # A short philtrum tick between nose and mouth -- the reference style
-    # includes it, and without it the area between nose and mouth reads
-    # as blank/flat. Spans from just below the drawn nose mark to the
-    # upper lip's top-center landmark.
-    nose_bottom_y = ys.max()
-    philtrum_top = (landmarks[2].x * w, nose_bottom_y + line_width)
-    philtrum_bottom = (landmarks[0].x * w, landmarks[0].y * h)
+    # includes it as a small, clearly separated mark, not touching the
+    # nose curve above it (touching is what read as one continuous
+    # vertical "bridge" stroke in an earlier version).
+    nose_center_y = ys[len(ys) // 2]
+    gap = eye_span * 0.05
+    philtrum_len = eye_span * 0.06
+    philtrum_top = (landmarks[2].x * w, nose_center_y + gap)
+    philtrum_bottom = (landmarks[2].x * w, nose_center_y + gap + philtrum_len)
     img = draw_smooth_open_stroke(img, [philtrum_top, philtrum_bottom], width=max(1, line_width - 1))
 
     # Mouth: a closed smile with real structure -- an upper curve through
