@@ -1270,8 +1270,15 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # never showed. Leveled that out (subtract the corner-to-corner linear
     # trend, re-add the flat average of both corner heights) before
     # applying the reduced shift.
-    mouth_shift = eye_span * 0.03
-    upper_lip_idx = [61, 40, 37, 0, 267, 270, 291]
+    # A sixth round pointed out the actual problem underneath all of the
+    # above: this was tracing the OUTER upper lip (its top edge, the
+    # vermillion border), not the seam where the lips actually meet --
+    # every previous "shift" was really just a rough correction trying to
+    # approximate seam position from outer-lip landmarks. Switched to the
+    # inner-lip contour, which sits directly on that seam, so no
+    # artificial shift should be needed anymore.
+    mouth_shift = 0.0
+    upper_lip_idx = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308]
     raw_pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in upper_lip_idx])
     corner_l, corner_r = raw_pts[0], raw_pts[-1]
     avg_corner_y = (corner_l[1] + corner_r[1]) / 2
