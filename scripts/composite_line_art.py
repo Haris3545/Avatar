@@ -1200,16 +1200,18 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # A direct correction against a real photo traced the whole nose sitting
     # a few px too low here versus its actual position -- shift it up.
     nose_shift = -eye_span * 0.045
-    # A gull-wing shape through all 7 raw landmarks (49, 129, 98, 2, 327,
-    # 358, 279) was traced against a real photo as visibly wrong -- the
-    # actual nose reads as one smooth, evenly-rounded arc with no kink or
-    # flat spot at the center, not two hooks either side of a dip. Using
-    # just the two nostril-wing corners and the tip gives a quadratic
-    # spline that's smooth by construction (no intermediate landmarks to
-    # introduce the kinks the gull-wing shape had).
-    nose_bottom_idx = [49, 2, 279]
+    # The original 7-landmark gull-wing spline (s=0, exact interpolation)
+    # had visible kinks at each landmark. A follow-up fix dropped to just
+    # 3 points (both nostril corners + tip), which removed the kinks but
+    # also flattened out the real structure -- a direct correction against
+    # a real photo confirmed the actual shape has a subtle upward bump at
+    # the septum/center, not a bare downward scoop. Keeping the full
+    # landmark set but adding a smoothing factor (s>0, an approximating
+    # rather than interpolating spline) rounds off the kinks while
+    # preserving that center bump.
+    nose_bottom_idx = [49, 129, 98, 2, 327, 358, 279]
     pts = np.array([(landmarks[i].x * w, landmarks[i].y * h + nose_shift) for i in nose_bottom_idx])
-    tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=2)
+    tck, _ = splprep([pts[:, 0], pts[:, 1]], s=len(pts) * 6, k=3)
     xs, ys = splev(np.linspace(0.0, 1.0, 24), tck)
     img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
 
