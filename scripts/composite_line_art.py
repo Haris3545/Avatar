@@ -561,12 +561,15 @@ def draw_pointed_stroke(canvas: Image.Image, points, base_width: float, fill=(0,
     return canvas
 
 
-def jag_fringe(contour: np.ndarray, n_teeth: int = 6, depth_frac: float = 0.035) -> np.ndarray:
+def jag_fringe(contour: np.ndarray, n_teeth: int = 6, depth_frac: float = 0.012) -> np.ndarray:
     """Perturb the top band of a hair contour with a few deliberate pointed
     teeth -- a fixed-frequency sine ripple, not random noise, so it reads
     as a deliberate tufted/jagged fringe edge (matching the reference
     avatars) instead of the smooth, plain curve smooth_contours would
-    otherwise produce for hair like it does for everything else."""
+    otherwise produce for hair like it does for everything else. Depth
+    reduced from an earlier 0.035 -- a direct correction against a real
+    photo traced a smooth hairline with no visible jag at that depth, only
+    a subtle one."""
     top_y = contour[:, 1].min()
     bbox_h = contour[:, 1].max() - top_y
     band = contour[:, 1] < top_y + bbox_h * 0.15
@@ -1156,19 +1159,18 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
 
     # Tapered (thick middle, thin ends) instead of a constant-width line --
     # matches the reference avatars' brush-stroke eyebrows rather than a
-    # uniform-diameter bar. Lifted slightly above their raw landmark
-    # position: on a subject wearing glasses whose frame sits high (at or
-    # above the natural brow line), the eyebrow line and the glasses' top
-    # rim can land close enough to visually merge into one line, making
-    # the eyebrows disappear. The reference avatars always show a clear
-    # gap between brow and glasses/eye regardless of the source photo, so
-    # a small fixed lift (proportional to eye spacing, not a guess) keeps
-    # that same separation instead of following the photo's geometry
-    # exactly.
+    # uniform-diameter bar. A small lift off their raw landmark position
+    # keeps the brow from literally overlapping the glasses' top rim pixel
+    # for pixel, but the actual house style (confirmed both by direct
+    # correction against a real photo and by the same design intent
+    # already established in generate_avatar_gemini.py's prompt: "sit
+    # close enough above the frame to almost touch or lightly overlap its
+    # top rim") wants the brow sitting close to/nearly touching the frame,
+    # not a large deliberate gap -- 0.08 was too much lift.
     eye_span = np.linalg.norm(
         np.array([landmarks[263].x * w, landmarks[263].y * h]) - np.array([landmarks[33].x * w, landmarks[33].y * h])
     )
-    brow_lift = eye_span * 0.08
+    brow_lift = eye_span * 0.02
     # Thin, only lightly tapered -- the confirmed reference style draws
     # eyebrows as a single simple curved stroke, not a thick filled shape
     # (an earlier version of this went bold/flat based on a different,
@@ -1222,8 +1224,13 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # specific face actually measured. An earlier, overly-minimized
     # version of this read as flat/expressionless -- these two lines are
     # the confirmed minimum for the mouth to still read as a smile.
+    # A direct correction against a real photo measured the whole mouth
+    # (not just the lower lip) sitting about 5% of eye_span too high here
+    # versus its actual position -- shift both lines down by that amount
+    # rather than just the landmarks' raw position.
+    mouth_shift = eye_span * 0.05
     upper_lip_idx = [61, 40, 37, 0, 267, 270, 291]
-    upts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in upper_lip_idx])
+    upts = np.array([(landmarks[i].x * w, landmarks[i].y * h + mouth_shift) for i in upper_lip_idx])
     utck, _ = splprep([upts[:, 0], upts[:, 1]], s=0, k=3)
     uxs, uys = splev(np.linspace(0, 1, 40), utck)
     img = draw_smooth_open_stroke(img, list(zip(uxs, uys)), width=line_width)
