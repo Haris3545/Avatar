@@ -30,12 +30,26 @@ PROMPT = (
     "Look at this illustrated avatar portrait. Answer with strict JSON only, no other text, "
     'in exactly this shape: {"glasses": true|false, "beard": true|false}. '
     '"glasses" is true only if the subject is drawn wearing glasses. '
-    '"beard" is true only if the subject has any visible drawn beard, moustache, or stubble texture.'
+    '"beard" is true only if the subject has an actual visible beard or moustache covering the '
+    "cheeks, chin, and/or upper lip as real facial hair. "
+    "Do NOT count a small confined dot-pattern shading patch directly under the chin as a beard -- "
+    "that's a stylized jaw-shadow/5-o'clock-shadow indicator used on many avatars regardless of "
+    "whether the subject has real facial hair, not an actual beard. Only a clearly drawn beard "
+    "shape (covering a wider area, usually including the sides of the face and/or moustache) counts."
 )
 
 
 def main():
+    import argparse
     import os
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="re-classify everything, overwriting the existing cache (e.g. after changing PROMPT)",
+    )
+    args = parser.parse_args()
 
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -52,7 +66,7 @@ def main():
     )
 
     tags = {}
-    if TAGS_PATH.exists():
+    if TAGS_PATH.exists() and not args.force:
         tags = json.loads(TAGS_PATH.read_text())
 
     import time

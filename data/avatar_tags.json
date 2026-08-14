@@ -60,11 +60,11 @@
     "glasses": false
   },
   "James Dunn Avatar 2025.jpg": {
-    "beard": true,
+    "beard": false,
     "glasses": false
   },
   "James Shoreland Avatar 2025.png": {
-    "beard": true,
+    "beard": false,
     "glasses": false
   },
   "Jess Mobbs 2023.png": {
@@ -128,7 +128,7 @@
     "glasses": false
   },
   "Will Parrish 2024.png": {
-    "beard": true,
+    "beard": false,
     "glasses": true
   }
 }

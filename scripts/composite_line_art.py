@@ -79,8 +79,13 @@ DETAIL_WIDTH = 5
 # computed once per photo from its actual pixel dimensions.
 WIDTH_REFERENCE_PX = 900
 
-CLOTHES_FILL = (165, 165, 165)
-CLOTHES_SHADOW_FILL = (120, 120, 120)
+CLOTHES_FILL = (55, 55, 55)
+CLOTHES_SHADOW_FILL = (35, 35, 35)
+# Hair is a flat mid-grey (not solid black) covered in dense directional
+# hatching strokes in the reference avatars -- lighter than clothing, with
+# the hatching itself drawn darker than the fill for contrast.
+HAIR_FILL = (110, 110, 110)
+HAIR_TEXTURE_COLOR = (35, 35, 35)
 
 
 def stroke_scale(w: int, h: int) -> float:
@@ -460,35 +465,47 @@ def jag_fringe(contour: np.ndarray, n_teeth: int = 6, depth_frac: float = 0.035)
     return result
 
 
-def draw_hair_texture(canvas: Image.Image, hair_only: np.ndarray, detail_width: float, n_marks: int = 6, seed: int = 7) -> Image.Image:
-    """A handful of short, thin, dark-grey directional strokes layered on
-    top of the solid black hair fill -- matches the reference avatars'
-    internal hair texture (strand direction hinted through scratch marks)
-    instead of a flat, featureless black mass. Positions are sampled with a
-    fixed seed so re-runs on the same photo are reproducible, and confined
-    to the hair mask's own middle band so they don't crowd the crown
-    (already marked by draw_hair_strands) or the very edge."""
+def draw_hair_texture(canvas: Image.Image, hair_only: np.ndarray, detail_width: float, n_marks: int = 28, seed: int = 7) -> Image.Image:
+    """Dense directional hatching strokes layered over the flat mid-grey
+    hair fill -- the reference avatars draw hair as strand-by-strand
+    linework (many individual strokes describing the actual hair flow,
+    like hand-inked hatching), not a flat silhouette with a couple of
+    accent marks. n_marks raised from an earlier "a handful of accents"
+    version (6) to actually read as hatching density. Positions are
+    sampled with a fixed seed so re-runs on the same photo are
+    reproducible, and confined to the hair mask's own middle band so they
+    don't crowd the crown (already marked by draw_hair_strands) or the
+    very edge."""
     ys, xs = np.where(hair_only)
     if ys.size == 0:
         return canvas
     top_y, bottom_y = ys.min(), ys.max()
     bbox_h = bottom_y - top_y
-    band = (ys > top_y + bbox_h * 0.15) & (ys < top_y + bbox_h * 0.85)
+    band = (ys > top_y + bbox_h * 0.1) & (ys < top_y + bbox_h * 0.9)
     ys_b, xs_b = ys[band], xs[band]
     if ys_b.size < n_marks:
+        n_marks = ys_b.size
+    if n_marks == 0:
         return canvas
 
     rng = np.random.default_rng(seed)
     idxs = rng.choice(ys_b.size, size=n_marks, replace=False)
-    length = max(bbox_h * 0.05, detail_width * 3)
     for i in idxs:
         bx, by = float(xs_b[i]), float(ys_b[i])
         # Roughly downward-flowing direction (hair falls from the crown),
-        # with a small per-mark spread so they don't all read as parallel.
-        angle = np.pi / 2 + rng.uniform(-0.35, 0.35)
+        # with a per-mark spread so they don't all read as parallel --
+        # and a per-mark length so hatching has natural variation instead
+        # of a uniform comb pattern. Floored by detail_width, not just a
+        # fraction of the hair region's own height: short/buzzed hair has
+        # a thin bbox_h, and a purely proportional length degenerates into
+        # dots too small to read as directional strokes at all.
+        length = max(bbox_h * rng.uniform(0.04, 0.11), detail_width * 2.5)
+        angle = np.pi / 2 + rng.uniform(-0.4, 0.4)
         dx, dy = np.cos(angle), np.sin(angle)
         tip = (bx + dx * length, by + dy * length)
-        canvas = draw_pointed_stroke(canvas, [(bx, by), tip], base_width=max(1, detail_width * 0.4), fill=(70, 70, 70))
+        canvas = draw_pointed_stroke(
+            canvas, [(bx, by), tip], base_width=max(1, detail_width * 0.35), fill=HAIR_TEXTURE_COLOR
+        )
 
     return canvas
 
@@ -818,7 +835,7 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     # smooth spline-fit edge, matching the reference avatars' hairline.
     hair_outer = [jag_fringe(c) for c in hair_outer]
 
-    out_im = draw_smooth_fills(out_im, hair_outer)
+    out_im = draw_smooth_fills(out_im, hair_outer, fill=HAIR_FILL)
     out_im = draw_smooth_fills(out_im, hair_holes, fill=(255, 255, 255))
     out_im = draw_smooth_fills(out_im, clothes_outer, fill=CLOTHES_FILL)
     out_im = draw_smooth_fills(out_im, clothes_holes, fill=(255, 255, 255))
@@ -835,7 +852,38 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     return np.array(out_im), foreground, gray, hair_clothes
 
 
-def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.ndarray, foreground: np.ndarray, landmarks, detail_width: float = DETAIL_WIDTH, scale: float = 1.0) -> Image.Image:
+def draw_glasses_sparkle(canvas: Image.Image, glasses_outer, detail_width: float) -> Image.Image:
+    """A couple of small diagonal reflection/sparkle ticks near one upper
+    lens corner -- a flourish the reference avatars use on glasses that
+    a plain outlined frame doesn't have. Only the single largest contour
+    (the main frame) gets the mark, not every piece (the bridge, a
+    separate lens if they didn't merge) -- the reference avatars only
+    ever show this near one corner, not scattered across the frame."""
+    if not glasses_outer:
+        return canvas
+
+    contour = max(
+        glasses_outer,
+        key=lambda c: (c[:, 0].max() - c[:, 0].min()) * (c[:, 1].max() - c[:, 1].min()),
+    )
+    top_y = contour[:, 1].min()
+    bbox_h = contour[:, 1].max() - top_y
+    band = contour[contour[:, 1] < top_y + bbox_h * 0.35]
+    if len(band) == 0:
+        return canvas
+
+    ax, ay = band[np.argmax(band[:, 0])]
+    length = bbox_h * 0.16
+    for offset in (0.0, 0.4):
+        x0 = ax + bbox_h * 0.08 + offset * length
+        y0 = ay - bbox_h * 0.1 - offset * length * 0.3
+        x1, y1 = x0 + length * 0.5, y0 - length * 0.5
+        canvas = draw_smooth_open_stroke(canvas, [(x0, y0), (x1, y1)], width=max(1, detail_width - 2))
+
+    return canvas
+
+
+def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.ndarray, foreground: np.ndarray, landmarks, detail_width: float = DETAIL_WIDTH, scale: float = 1.0, glasses: bool = False) -> Image.Image:
     """Threshold real dark detail within the skin -- currently just
     glasses, drawn as a single continuous outline -- and drop everything
     else (beard shadow, stubble, skin texture) instead of painting it as a
@@ -881,6 +929,18 @@ def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.nd
 
     out_im = Image.fromarray(out)
 
+    # Whether the subject wears glasses is taken as an explicit input
+    # (the `glasses` parameter) rather than guessed from pixels: a
+    # brightness/area heuristic here can't actually distinguish "this is
+    # a glasses frame" from "this person has visible dark eyebrows" --
+    # real eyebrow pixels alone routinely cover well over the area
+    # fraction a real glasses frame would, since eyebrows are a
+    # legitimate, substantial dark feature within this same padded
+    # search box. Trying to out-guess that from pixel area produced a
+    # false-positive "glasses" outline (plus sparkle flourish) drawn
+    # around a subject's own eyebrow/eye-socket shadow. An explicit flag
+    # sidesteps the ambiguity entirely.
+    #
     # Not dark_mask (which requires skin_mask to be true at that pixel):
     # the glasses frame itself is exactly what the segmenter does *not*
     # classify as skin, so restricting to skin_mask was excluding almost
@@ -900,18 +960,19 @@ def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.nd
     # guaranteeing the drawn line has no breaks regardless of how
     # fragmented the raw pixels were.
     glasses_raw = glasses_region & foreground & (gray_norm < 120)
-    if glasses_raw.any():
+    if glasses and glasses_raw.any():
         glasses_closed = ndimage.binary_closing(glasses_raw, structure=disk(max(2, round(5 * scale))))
         glasses_outer, glasses_holes = smooth_contours(
             glasses_closed, min_area_frac=0.0006, include_holes=True, smoothing=0.4
         )
         out_im = draw_smooth_strokes(out_im, glasses_outer, width=detail_width)
         out_im = draw_smooth_strokes(out_im, glasses_holes, width=detail_width)
+        out_im = draw_glasses_sparkle(out_im, glasses_outer, detail_width)
 
     return out_im
 
 
-def composite_line_art(photo_path: Path, out_path: Path):
+def composite_line_art(photo_path: Path, out_path: Path, glasses: bool = False):
     print("Segmenting photo...")
     im = Image.open(photo_path).convert("RGB")
     cat_mask = segment(im)
@@ -924,7 +985,9 @@ def composite_line_art(photo_path: Path, out_path: Path):
 
     out_im = Image.fromarray(out)
     out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=detail_width)
-    out_im = draw_dark_face_detail(out_im, cat_mask, gray, foreground, landmarks, detail_width=detail_width, scale=scale)
+    out_im = draw_dark_face_detail(
+        out_im, cat_mask, gray, foreground, landmarks, detail_width=detail_width, scale=scale, glasses=glasses
+    )
     out = np.array(out_im)
 
     if landmarks is not None:
@@ -1010,9 +1073,13 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
         np.array([landmarks[263].x * w, landmarks[263].y * h]) - np.array([landmarks[33].x * w, landmarks[33].y * h])
     )
     brow_lift = eye_span * 0.08
+    # Thick and only lightly tapered -- the reference avatars draw eyebrows
+    # as a bold, almost-solid flat shape, closer to a small filled polygon
+    # than a thin stroke. end_width close to mid_width keeps most of the
+    # shape's width instead of tapering down to a thin point at each end.
     for conns in (connections.FACE_LANDMARKS_LEFT_EYEBROW, connections.FACE_LANDMARKS_RIGHT_EYEBROW):
         pts = [(px, py - brow_lift) for px, py in ordered_points(conns)]
-        img = draw_tapered_stroke(img, pts, mid_width=detail_width + 1, end_width=max(1, detail_width - 2))
+        img = draw_tapered_stroke(img, pts, mid_width=detail_width * 2.2, end_width=detail_width * 1.4)
 
     # Just the line under the nose (nostril hook to nostril hook), not the
     # full nose mesh (bridge + nostril wings + tip outline) -- matches the
@@ -1028,13 +1095,14 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in nose_bottom_idx])
     tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
     # Reference avatars mark the nose with a small comma-like mark near the
-    # tip, not a line spanning the full nostril-to-nostril width -- sample
-    # only the middle portion of the same real spline (rather than a
-    # separately-guessed shape) to shrink it down to that size while
-    # keeping its actual up-down-up-down curvature. Narrowed further (was
-    # 0.32-0.68) to match how minimal the reference nose marks actually are.
-    xs, ys = splev(np.linspace(0.4, 0.6, 16), tck)
-    img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
+    # tip -- often barely visible at all -- not a line spanning the full
+    # nostril-to-nostril width. Sample only a narrow middle sliver of the
+    # same real spline (rather than a separately-guessed shape) to shrink
+    # it down to that size while keeping its actual curvature. Narrowed
+    # progressively (was 0.32-0.68, then 0.4-0.6) to match how minimal the
+    # reference nose marks actually are.
+    xs, ys = splev(np.linspace(0.44, 0.56, 10), tck)
+    img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 2))
 
     # Mouth: a simple two-line smile, not the full lip outline -- an upper
     # curve through the real outer-lip landmarks (mouth corners to cupid's
@@ -1085,7 +1153,7 @@ def structure_composite(photo_path: Path, out_path: Path):
     print(f"Saved to {out_path}")
 
 
-def scaffold_composite(photo_path: Path, out_path: Path, mask_path: Path):
+def scaffold_composite(photo_path: Path, out_path: Path, mask_path: Path, glasses: bool = False):
     """A third mode: the classical pipeline's own outer silhouette/hair
     shape and jaw/cheek contour, locked in as final art, with a companion
     inpaint mask marking the interior face region as editable. Meant for
@@ -1111,7 +1179,9 @@ def scaffold_composite(photo_path: Path, out_path: Path, mask_path: Path):
 
     out_im = Image.fromarray(out)
     out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=detail_width)
-    out_im = draw_dark_face_detail(out_im, cat_mask, gray, foreground, landmarks, detail_width=detail_width, scale=scale)
+    out_im = draw_dark_face_detail(
+        out_im, cat_mask, gray, foreground, landmarks, detail_width=detail_width, scale=scale, glasses=glasses
+    )
 
     # Eyebrows, nose, mouth, and eyes are drawn classically here too
     # (previously only composite_line_art()/structure_composite() did this)
@@ -1150,12 +1220,13 @@ def scaffold_composite(photo_path: Path, out_path: Path, mask_path: Path):
 def main():
     if len(sys.argv) < 2:
         sys.exit(
-            "Usage: composite_line_art.py path/to/photo.jpg [out.png] [--structure|--scaffold]"
+            "Usage: composite_line_art.py path/to/photo.jpg [out.png] [--structure|--scaffold] [--glasses]"
         )
 
     structure_mode = "--structure" in sys.argv
     scaffold_mode = "--scaffold" in sys.argv
-    args = [a for a in sys.argv[1:] if a not in ("--structure", "--scaffold")]
+    glasses = "--glasses" in sys.argv
+    args = [a for a in sys.argv[1:] if a not in ("--structure", "--scaffold", "--glasses")]
 
     photo_path = Path(args[0])
     default_suffix = "_structure" if structure_mode else "_scaffold" if scaffold_mode else "_lineart"
@@ -1165,11 +1236,11 @@ def main():
 
     if scaffold_mode:
         mask_path = out_path.with_name(out_path.stem + "_mask.png")
-        scaffold_composite(photo_path, out_path, mask_path)
+        scaffold_composite(photo_path, out_path, mask_path, glasses=glasses)
     elif structure_mode:
         structure_composite(photo_path, out_path)
     else:
-        composite_line_art(photo_path, out_path)
+        composite_line_art(photo_path, out_path, glasses=glasses)
 
 
 if __name__ == "__main__":
