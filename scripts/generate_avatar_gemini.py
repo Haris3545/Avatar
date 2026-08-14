@@ -108,6 +108,26 @@ STRUCTURE_PREAMBLE = (
     "rendering style only, not structure. "
 )
 
+REFINEMENT_PREAMBLE = (
+    "The FIRST attached image is the structural line-art reference -- authoritative for "
+    "proportions and positions (jaw width/taper, eye/nose/mouth position and shape, hairline, "
+    "glasses shape). "
+    "The SECOND attached image is your own most recent draft, which needs refinement, not a "
+    "fresh redraw. "
+    "The THIRD attached image is the original photo, included only for visual detail the "
+    "structural image doesn't capture (skin tone, real hair color, glasses color) -- never let "
+    "it override the structural image's proportions. "
+    "The remaining attached images are house-style reference avatars for line quality and "
+    "rendering style only, not structure. "
+    "Compare your previous draft against the structural reference and correct any proportions "
+    "that drifted from it -- especially jaw shape/width/taper, eye shape and spacing, nose "
+    "shape, and ear position/shape, all of which are what make an avatar actually recognizable "
+    "as this specific person. Keep everything about the previous draft that already matches "
+    "well, and keep the exact same house illustration style (thick bold uniform linework, flat "
+    "white skin with no shading, flat grey clothing). This is a targeted correction pass on "
+    "your own prior output, not a fresh interpretation of the photo -- do not start over. "
+)
+
 DEFAULT_PROMPT = (
     "Redraw the attached photo as a VCCP-style graphic portrait avatar, matching the exact "
     "illustration style of the other attached reference avatar images -- not just loosely "
@@ -222,7 +242,22 @@ def main():
         help="skip the structural reference entirely and generate from the photo alone (the "
         "original behavior) -- useful for comparing against the structure-anchored result.",
     )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=1,
+        help="Run N refinement passes instead of one generation: pass 1 generates from the "
+        "photo/structure as normal, each subsequent pass feeds Gemini its own previous output "
+        "plus the structure reference again and asks for a targeted correction, not a fresh "
+        "redraw. Every pass is saved separately (<out>_iter1.png, _iter2.png, ...) so you can "
+        "compare and pick the best one rather than trusting the last pass is automatically "
+        "best -- there's no reliable auto-stop-when-converged check for line art, where a single "
+        "redrawn line can move many pixels without the drawing meaningfully changing.",
+    )
     args = parser.parse_args()
+
+    if args.iterations < 1:
+        sys.exit("--iterations must be at least 1")
 
     if args.glasses and args.no_glasses:
         sys.exit("--glasses and --no-glasses are mutually exclusive")
@@ -273,7 +308,18 @@ def main():
         structure_path = photo_path.with_name(photo_path.stem + "_structure_for_gemini.png")
         composite_line_art.composite_line_art(photo_path, structure_path, glasses=bool(want_glasses))
 
+    def extract_image(response):
+        for part in response.candidates[0].content.parts:
+            if getattr(part, "inline_data", None) is not None:
+                from io import BytesIO
+
+                return Image.open(BytesIO(part.inline_data.data))
+        text = "".join(part.text for part in response.candidates[0].content.parts if getattr(part, "text", None))
+        sys.exit(f"No image returned. Model response:\n{text}")
+
     print(f"Loading {len(reference_paths)} reference avatar(s)...")
+    out_path = Path(args.out)
+
     prompt = (STRUCTURE_PREAMBLE + args.prompt) if structure_path else args.prompt
     contents = [prompt]
     if structure_path:
@@ -282,21 +328,32 @@ def main():
     for p in reference_paths:
         contents.append(Image.open(p))
 
-    print(f"Generating with {args.model}...")
+    print(f"Generating with {args.model} (pass 1/{args.iterations})...")
     response = client.models.generate_content(model=args.model, contents=contents)
+    current = extract_image(response)
 
-    saved = False
-    for part in response.candidates[0].content.parts:
-        if getattr(part, "inline_data", None) is not None:
-            from io import BytesIO
+    iter_path = out_path.with_name(f"{out_path.stem}_iter1{out_path.suffix}")
+    current.save(iter_path)
+    print(f"Saved pass 1 to {iter_path}")
 
-            Image.open(BytesIO(part.inline_data.data)).save(args.out)
-            saved = True
-            break
+    for i in range(2, args.iterations + 1):
+        print(f"Refining with {args.model} (pass {i}/{args.iterations})...")
+        refine_contents = [REFINEMENT_PREAMBLE + args.prompt]
+        if structure_path:
+            refine_contents.append(Image.open(structure_path))
+        refine_contents.append(current)
+        refine_contents.append(Image.open(photo_path))
+        for p in reference_paths:
+            refine_contents.append(Image.open(p))
 
-    if not saved:
-        text = "".join(part.text for part in response.candidates[0].content.parts if getattr(part, "text", None))
-        sys.exit(f"No image returned. Model response:\n{text}")
+        response = client.models.generate_content(model=args.model, contents=refine_contents)
+        current = extract_image(response)
+
+        iter_path = out_path.with_name(f"{out_path.stem}_iter{i}{out_path.suffix}")
+        current.save(iter_path)
+        print(f"Saved pass {i} to {iter_path}")
+
+    current.save(out_path)
 
     print(f"Saved to {args.out}")
 
