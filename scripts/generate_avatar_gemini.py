@@ -16,19 +16,26 @@ InstantID pipeline on a first try, with none of the halftone/stipple/
 gappy-glasses fighting that pipeline needed.
 
 Default references are the *entire* existing avatar set (data/avatars/),
-not a hand-picked few -- more in-context examples should generalize the
-house style more reliably than any 3 could, at the cost of a slower,
-larger, more expensive request per generation. If that trade turns out
-wrong in practice (the model dilutes/averages instead of generalizing,
-or latency/cost becomes a problem), pass --references with a smaller
-explicit list to cut it back down.
+optionally filtered down by --glasses/--no-glasses and --beard/--no-beard
+to only the references that match the subject's actual features (see
+scripts/tag_avatar_references.py, which classifies each reference once
+and caches the result in data/avatar_tags.json). Sending the whole
+unfiltered set produced results that were more polished than the house
+style but didn't really look like it: averaging in-context examples
+across many different feature combinations (glasses vs not, beard vs
+not) muddies exactly the per-feature drawing conventions -- how glasses
+are drawn, how a beard is drawn -- that make an avatar read as "ours" for
+a specific class of subject. Filtering to only matching references keeps
+those conventions intact.
 
 Usage:
     export GEMINI_API_KEY=...   # from https://aistudio.google.com/apikey
-    python3 scripts/generate_avatar_gemini.py path/to/photo.jpg
+    python3 scripts/tag_avatar_references.py   # one-time, cached afterward
+    python3 scripts/generate_avatar_gemini.py path/to/photo.jpg --glasses --no-beard
     python3 scripts/generate_avatar_gemini.py path/to/photo.jpg --references data/avatars/A.png,data/avatars/B.png
 """
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -39,11 +46,47 @@ ROOT = Path(__file__).resolve().parent.parent
 # run), so results stay comparable across different subjects instead of
 # drifting with whatever subset happened to be picked that day. Sorted
 # for a deterministic, reviewable request rather than directory-listing
-# order, which can vary by filesystem.
+# order, which can vary by filesystem. Narrowed at runtime by
+# filter_references() when --glasses/--beard flags are given.
 AVATARS_DIR = ROOT / "data" / "avatars"
+TAGS_PATH = ROOT / "data" / "avatar_tags.json"
 DEFAULT_REFERENCES = sorted(
     p for p in AVATARS_DIR.iterdir() if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg")
 )
+
+
+def filter_references(paths, want_glasses, want_beard):
+    """Narrow the reference set to only avatars matching the requested
+    glasses/beard category, using the cache from tag_avatar_references.py.
+    Falls back to the unfiltered set (with a warning) if the cache is
+    missing, or if a category is requested but fewer than 3 references
+    match it -- too few in-context examples risks overfitting to those
+    specific people's features rather than generalizing the style."""
+    if want_glasses is None and want_beard is None:
+        return paths
+
+    if not TAGS_PATH.exists():
+        print(f"Warning: {TAGS_PATH} not found -- run scripts/tag_avatar_references.py first. Using unfiltered references.")
+        return paths
+
+    tags = json.loads(TAGS_PATH.read_text())
+    filtered = []
+    for p in paths:
+        t = tags.get(p.name)
+        if t is None:
+            continue
+        if want_glasses is not None and t.get("glasses") != want_glasses:
+            continue
+        if want_beard is not None and t.get("beard") != want_beard:
+            continue
+        filtered.append(p)
+
+    if len(filtered) < 3:
+        print(f"Warning: only {len(filtered)} reference(s) matched the requested category -- falling back to the full set.")
+        return paths
+
+    print(f"Filtered to {len(filtered)} reference(s) matching glasses={want_glasses}, beard={want_beard}")
+    return filtered
 
 DEFAULT_PROMPT = (
     "Redraw the attached photo as a VCCP-style graphic portrait avatar, matching the exact "
@@ -89,7 +132,32 @@ def main():
         default="gemini-2.5-flash-image",
         help="Gemini image model ID. Override if this ID has since been renamed/retired.",
     )
+    parser.add_argument(
+        "--glasses",
+        action="store_true",
+        help="subject wears glasses -- only use glasses-wearing references (see tag_avatar_references.py)",
+    )
+    parser.add_argument(
+        "--no-glasses",
+        action="store_true",
+        help="subject does not wear glasses -- exclude glasses-wearing references",
+    )
+    parser.add_argument(
+        "--beard",
+        action="store_true",
+        help="subject has a beard/visible facial hair -- only use bearded references",
+    )
+    parser.add_argument(
+        "--no-beard",
+        action="store_true",
+        help="subject is clean-shaven -- exclude bearded references",
+    )
     args = parser.parse_args()
+
+    if args.glasses and args.no_glasses:
+        sys.exit("--glasses and --no-glasses are mutually exclusive")
+    if args.beard and args.no_beard:
+        sys.exit("--beard and --no-beard are mutually exclusive")
 
     photo_path = Path(args.photo)
     if not photo_path.exists():
@@ -99,6 +167,10 @@ def main():
     missing = [p for p in reference_paths if not p.exists()]
     if missing:
         sys.exit("Reference image(s) not found: " + ", ".join(str(p) for p in missing))
+
+    want_glasses = True if args.glasses else (False if args.no_glasses else None)
+    want_beard = True if args.beard else (False if args.no_beard else None)
+    reference_paths = filter_references(reference_paths, want_glasses, want_beard)
 
     import os
 
