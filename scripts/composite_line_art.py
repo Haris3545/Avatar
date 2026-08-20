@@ -202,6 +202,165 @@ def get_face_landmarks(im: Image.Image):
         return result.face_landmarks[0] if result.face_landmarks else None
 
 
+FACE_PARSING_MODEL_URL = "https://github.com/yakhyo/face-parsing/releases/download/weights/resnet18.onnx"
+FACE_PARSING_MODEL_CACHE = Path.home() / ".cache" / "avatar_models" / "face_parsing_resnet18.onnx"
+
+# The CelebAMask-HQ 19-class scheme this model was trained on. Class 0 is
+# background; classes 1..18 map to ATTRIBUTES[0..17] (i.e. mask value ==
+# index + 1).
+FACE_PARSING_ATTRIBUTES = [
+    "skin", "l_brow", "r_brow", "l_eye", "r_eye", "eye_g", "l_ear", "r_ear",
+    "ear_r", "nose", "mouth", "u_lip", "l_lip", "neck", "neck_l", "cloth",
+    "hair", "hat",
+]
+FACE_PARSING_CLASS = {name: i + 1 for i, name in enumerate(FACE_PARSING_ATTRIBUTES)}
+
+
+def get_face_parsing_model_path() -> Path:
+    if not FACE_PARSING_MODEL_CACHE.exists():
+        print("Downloading face parsing model (one-time, ~50MB)...")
+        FACE_PARSING_MODEL_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(FACE_PARSING_MODEL_URL, FACE_PARSING_MODEL_CACHE)
+    return FACE_PARSING_MODEL_CACHE
+
+
+def parse_face_regions(im: Image.Image, landmarks, w: int, h: int):
+    """Runs a CelebAMask-HQ-trained BiSeNet face parser (see
+    FACE_PARSING_ATTRIBUTES) and returns (class_mask, crop_box), where
+    class_mask is a per-pixel class-index array covering crop_box = (x0,
+    y0, x1, y1) in the original photo's pixel coordinates.
+
+    This model expects a tight face-only crop, like its CelebAMask-HQ
+    training images -- feeding it the full photo (with shoulders/
+    background) starves the face of resolution and the parser silently
+    fails on most classes: confirmed directly, nose/eyes/lips all came
+    back with zero pixels on a full-frame input, and detected fine once
+    cropped to the landmark bounding box padded generously for forehead/
+    hair/some neck, matching CelebAMask-HQ's own framing.
+
+    Unlike the landmark-index approach this replaces for facial-feature
+    outlines, this returns the actual measured pixel boundary of each
+    feature in this specific photo -- not an approximation from a fixed,
+    generic point scheme."""
+    import onnxruntime as ort
+    import cv2
+
+    xs = [lm.x * w for lm in landmarks]
+    ys = [lm.y * h for lm in landmarks]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    pad_x = (x1 - x0) * 0.5
+    pad_y_top = (y1 - y0) * 0.9
+    pad_y_bot = (y1 - y0) * 0.5
+    cx0, cx1 = max(0.0, x0 - pad_x), min(float(w), x1 + pad_x)
+    cy0, cy1 = max(0.0, y0 - pad_y_top), min(float(h), y1 + pad_y_bot)
+
+    im_bgr = cv2.cvtColor(np.array(im.convert("RGB")), cv2.COLOR_RGB2BGR)
+    crop = im_bgr[int(cy0):int(cy1), int(cx0):int(cx1)]
+    ch, cw = crop.shape[:2]
+
+    sess = ort.InferenceSession(str(get_face_parsing_model_path()), providers=["CPUExecutionProvider"])
+    input_name = sess.get_inputs()[0].name
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+    rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+    resized = cv2.resize(rgb, (512, 512), interpolation=cv2.INTER_LINEAR)
+    x = (resized.astype(np.float32) / 255.0 - mean) / std
+    x = np.transpose(x, (2, 0, 1))[None].astype(np.float32)
+
+    out = sess.run(["output"], {input_name: x})[0]
+    mask512 = out.squeeze(0).argmax(0).astype(np.uint8)
+    mask = cv2.resize(mask512, (cw, ch), interpolation=cv2.INTER_NEAREST)
+
+    return mask, (int(cx0), int(cy0), int(cx1), int(cy1))
+
+
+def vector_trace_bottom_arc(mask_crop: np.ndarray, class_id: int, crop_box, upscale: int = 8):
+    """Given a parsing mask crop and a class index, vector-traces that
+    class's region boundary with vtracer (real Bezier curve fitting, not a
+    hand-rolled spline) and returns just its bottom arc -- the portion of
+    the closed loop between the shape's leftmost and rightmost points that
+    runs through the lower half, i.e. the part that reads as "the bottom
+    edge of this feature" rather than its sides or top. Points come back
+    in original-photo pixel coordinates.
+
+    Splitting at the shape's own left/right extrema (rather than a fixed
+    y-fraction threshold) is what keeps this from grabbing too much: a
+    threshold loose enough to reach the hook height at the ends is also
+    loose enough to walk back up the sides and close into a full loop --
+    confirmed directly, a 0.55-of-height threshold produced a closed oval,
+    not an open arc. The extrema split has no such failure mode: the
+    bottom and top arcs are geometrically exactly the two halves either
+    side of the shape's widest point, by construction.
+
+    The raw parsing mask is native to the 512x512 model input, so its
+    boundary is blocky at the crop's actual resolution -- upscaling,
+    blurring, and re-thresholding before tracing (rather than tracing the
+    blocky mask directly) is what gives vtracer a clean edge to fit a
+    smooth curve to instead of amplifying the blockiness into jagged
+    Bezier segments."""
+    import cv2
+    import vtracer
+    from svgpathtools import parse_path
+    import re
+    import tempfile
+
+    region = (mask_crop == class_id).astype(np.uint8)
+    region = cv2.morphologyEx(region, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    region = cv2.morphologyEx(region, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+
+    big = cv2.resize(region * 255, (region.shape[1] * upscale, region.shape[0] * upscale), interpolation=cv2.INTER_LINEAR)
+    big = cv2.GaussianBlur(big, (0, 0), sigmaX=upscale * 0.8)
+    _, big = cv2.threshold(big, 127, 255, cv2.THRESH_BINARY)
+    pad = 20
+    big = cv2.copyMakeBorder(big, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        png_path = f"{tmp}/mask.png"
+        svg_path = f"{tmp}/mask.svg"
+        cv2.imwrite(png_path, big)
+        vtracer.convert_image_to_svg_py(
+            png_path, svg_path,
+            colormode="binary", mode="spline", filter_speckle=20,
+            corner_threshold=100, length_threshold=8.0, splice_threshold=60,
+            path_precision=2,
+        )
+        svg = open(svg_path).read()
+
+    d = re.search(r'd="([^"]+)"', svg).group(1)
+    tx, ty = 0.0, 0.0
+    tmatch = re.search(r"translate\(([^,]+),([^)]+)\)", svg)
+    if tmatch:
+        tx, ty = float(tmatch.group(1)), float(tmatch.group(2))
+    subpaths = re.findall(r"M[^M]*", d)
+    areas = []
+    for sp in subpaths:
+        nums = [float(v) for v in re.findall(r"-?\d+\.?\d*", sp)]
+        sxs, sys_ = nums[0::2], nums[1::2]
+        areas.append((max(sxs) - min(sxs)) * (max(sys_) - min(sys_)))
+    # The smallest-bbox subpath is the traced feature itself; a larger one
+    # is the outer canvas rectangle vtracer also emits in binary mode.
+    best = subpaths[int(np.argmin(areas))]
+
+    path = parse_path(best)
+    N = 300
+    pts = np.array([[path.point(i / N).real + tx, path.point(i / N).imag + ty] for i in range(N)])
+
+    i_left, i_right = int(np.argmin(pts[:, 0])), int(np.argmax(pts[:, 0]))
+
+    def arc_between(i0, i1):
+        return list(range(i0, i1 + 1)) if i0 <= i1 else list(range(i0, N)) + list(range(0, i1 + 1))
+
+    arc_a = pts[arc_between(i_left, i_right)]
+    arc_b = pts[arc_between(i_right, i_left)]
+    bottom = arc_a if arc_a[:, 1].mean() > arc_b[:, 1].mean() else arc_b
+
+    cx0, cy0, _, _ = crop_box
+    bottom_full = (bottom - pad) / upscale + np.array([cx0, cy0])
+    return bottom_full
+
+
 def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
     """Replace traced eye detail with the house style's extreme
     simplification: a solid dot for the pupil and a single curved arc for
@@ -1094,7 +1253,7 @@ def composite_line_art(photo_path: Path, out_path: Path, glasses: bool = False):
     out = np.array(out_im)
 
     if landmarks is not None:
-        out = draw_face_structure_lines(out, landmarks, w, h, detail_width=detail_width)
+        out = draw_face_structure_lines(out, im, landmarks, w, h, detail_width=detail_width)
         out = draw_dot_eyes(out, landmarks, w, h)
     else:
         print("No face detected, skipping face structure lines and dot-eye replacement")
@@ -1123,7 +1282,7 @@ def face_skin_contours(cat_mask: np.ndarray):
     return smooth_contours(cat_mask == FACE_SKIN, min_area_frac=0.01, smoothing=0.5)
 
 
-def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail_width: float = DETAIL_WIDTH) -> np.ndarray:
+def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: int, h: int, detail_width: float = DETAIL_WIDTH) -> np.ndarray:
     """Draw only geometric likeness cues -- face/jaw shape, eyebrow shape and
     position, nose bridge and width -- as thin lines from real landmark
     positions, instead of tracing brightness/texture from the photo. This is
@@ -1197,31 +1356,38 @@ def draw_face_structure_lines(out: np.ndarray, landmarks, w: int, h: int, detail
     # it read as one fluid stroke.
     from scipy.interpolate import splev, splprep
 
-    # The flat-shelf/step construction was itself the problem: a direct
-    # side-by-side comparison against the hand-traced reference showed
-    # every flat segment and sharp corner it introduced was wrong -- the
-    # real reference is one continuously curving stroke with no flat
-    # sections at all. It also showed the reference is wider and its two
-    # end hooks rise noticeably higher (closer to the nose tip) than the
-    # crease-only chain (64...294) reaches on its own. 49 and 279 sit
-    # almost directly above 64 and 294 (same x, ~8px higher, near the
-    # bridge tip's height) with 129/358 in between -- adding them at each
-    # end (not the further wing-arc points, which closed the earlier
-    # attempt into a full oval) gives that taller hook at the same width
-    # as the crease's own natural corners, without reaching the bridge.
-    # A plain s=0 spline through all of it is smooth everywhere, no flat
-    # shelves.
-    nose_bottom_idx = [49, 129, 64, 98, 97, 2, 326, 327, 294, 358, 279]
-    pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in nose_bottom_idx])
-    tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
-    xs, ys = splev(np.linspace(0.0, 1.0, 60), tck)
+    # Landmark-index guessing for this line went through many rounds
+    # (guessed indices sitting above the real crease, then a chain that
+    # reached too far and closed into a full loop, etc.) because a fixed
+    # set of point indices is only ever an approximation of where the
+    # nose bottom actually falls in a specific photo. parse_face_regions()
+    # + vector_trace_bottom_arc() sidestep that: they get the parser's own
+    # measured "nose" pixel mask for THIS photo and vector-trace its real
+    # boundary, so the curve is this face's actual nose shape, not a
+    # generic point scheme's approximation of it. Falls back to the old
+    # landmark spline if parsing fails for any reason (e.g. a face the
+    # parser can't crop/detect well) rather than raising.
+    try:
+        parsing_mask, parsing_crop_box = parse_face_regions(im, landmarks, w, h)
+        nose_pts = vector_trace_bottom_arc(parsing_mask, FACE_PARSING_CLASS["nose"], parsing_crop_box)
+        xs, ys = nose_pts[:, 0], nose_pts[:, 1]
+    except Exception as e:
+        print(f"Face-parsing nose trace failed ({e}); falling back to landmark spline")
+        nose_bottom_idx = [49, 129, 64, 98, 97, 2, 326, 327, 294, 358, 279]
+        pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in nose_bottom_idx])
+        tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
+        xs, ys = splev(np.linspace(0.0, 1.0, 60), tck)
     img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
 
     # A short philtrum tick between nose and mouth -- the reference style
     # includes it as a small, clearly separated mark, not touching the
     # nose curve above it (touching is what read as one continuous
     # vertical "bridge" stroke in an earlier version).
-    nose_center_y = ys[len(ys) // 2]
+    # ys isn't necessarily ordered left-to-right along x (the vtraced arc's
+    # point order follows the traced path, not x-position), so take the
+    # y at whichever traced point sits closest to the philtrum landmark's
+    # x, rather than assuming the middle array index is the visual center.
+    nose_center_y = ys[np.argmin(np.abs(np.asarray(xs) - landmarks[2].x * w))]
     gap = eye_span * 0.05
     philtrum_len = eye_span * 0.06
     philtrum_top = (landmarks[2].x * w, nose_center_y + gap)
@@ -1302,7 +1468,7 @@ def structure_composite(photo_path: Path, out_path: Path):
     out = np.array(out_im)
 
     if landmarks is not None:
-        out = draw_face_structure_lines(out, landmarks, w, h, detail_width=detail_width)
+        out = draw_face_structure_lines(out, im, landmarks, w, h, detail_width=detail_width)
         out = draw_dot_eyes(out, landmarks, w, h)
     else:
         print("No face detected, skipping face structure lines")
@@ -1349,7 +1515,7 @@ def scaffold_composite(photo_path: Path, out_path: Path, mask_path: Path, glasse
     # freehand from a blank masked hole with only a text prompt to go on,
     # which is what was actually producing the stubble/gap artifacts.
     if landmarks is not None:
-        out = draw_face_structure_lines(np.array(out_im), landmarks, w, h, detail_width=detail_width)
+        out = draw_face_structure_lines(np.array(out_im), im, landmarks, w, h, detail_width=detail_width)
         out = draw_dot_eyes(out, landmarks, w, h)
     else:
         print("No face detected, skipping face structure lines and dot-eye replacement")

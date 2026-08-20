@@ -6,3 +6,6 @@ mediapipe
 scipy
 numpy
 google-genai
+vtracer
+svgpathtools
+opencv-contrib-python
