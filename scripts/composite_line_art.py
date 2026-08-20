@@ -1209,7 +1209,11 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     out_im = draw_smooth_strokes(out_im, clothes_outer, width=outline_width)
     out_im = draw_smooth_strokes(out_im, clothes_holes, width=outline_width)
     out_im = draw_collar_hint(out_im, clothes_outer, detail_width)
-    out_im = draw_hair_flow_lines(out_im, hair_outer, hair_fill, detail_width=detail_width)
+    # draw_hair_flow_lines disabled per direct feedback ("the hair lines
+    # are bad, remove them for now") -- function kept defined, not
+    # deleted, since "for now" implies this may come back in a revised
+    # form rather than being rejected outright the way the two earlier
+    # hair-mark approaches were.
 
     return np.array(out_im), foreground, gray, hair_clothes
 
@@ -1373,11 +1377,12 @@ def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.nd
         glasses_outer, glasses_holes = smooth_contours(
             glasses_closed, min_area_frac=0.0006, include_holes=True, smoothing=0.4
         )
-        # Bolder than the general detail_width (everything else is thin
-        # in this style, but the reference glasses frame is consistently
-        # drawn thick/confident, not at the same weight as the eyebrows
-        # or nose).
-        glasses_width = detail_width + 2
+        # No extra bump over detail_width anymore (was +2) -- that made
+        # sense back when detail_width was thin (3) and glasses needed to
+        # stand out as visibly bolder, but detail_width itself is now
+        # bumped up globally (5), and the extra +2 on top of that read as
+        # too thick.
+        glasses_width = detail_width
         out_im = draw_smooth_strokes(out_im, glasses_outer, width=glasses_width)
         out_im = draw_smooth_strokes(out_im, glasses_holes, width=glasses_width)
         # No sparkle/reflection tick flourish here (a prior version added
@@ -1710,41 +1715,31 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
         tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
         xs, ys = splev(np.linspace(0.0, 1.0, 60), tck)
 
-    # Trimmed to roughly the middle 3/5ths of its own width -- a direct
-    # style comparison against a reference avatar showed the nose there
-    # is deliberately less descriptive than a corner-to-corner trace,
-    # covering only the central portion rather than the full nostril-to-
-    # nostril span. xs isn't necessarily sorted (it follows the traced
-    # arc's real path order), so filter by x-range rather than by index;
-    # the arc is monotonic enough in x that this still leaves a
-    # contiguous, sensibly-ordered middle run for the tapered stroke
-    # below to draw as one continuous line.
+    # Trimmed to roughly the middle 4/5ths of its own width (was 3/5ths --
+    # that cut off too much) -- a direct style comparison against a
+    # reference avatar showed the nose there is deliberately less
+    # descriptive than a corner-to-corner trace, covering only the
+    # central portion rather than the full nostril-to-nostril span. xs
+    # isn't necessarily sorted (it follows the traced arc's real path
+    # order), so filter by x-range rather than by index; the arc is
+    # monotonic enough in x that this still leaves a contiguous,
+    # sensibly-ordered middle run for the stroke below to draw as one
+    # continuous line.
     xs, ys = np.asarray(xs), np.asarray(ys)
     x_span = xs.max() - xs.min()
-    keep = (xs > xs.min() + x_span * 0.2) & (xs < xs.max() - x_span * 0.2)
+    keep = (xs > xs.min() + x_span * 0.1) & (xs < xs.max() - x_span * 0.1)
     if keep.sum() >= 2:
         xs, ys = xs[keep], ys[keep]
-    # Tapered rather than constant-width, matching the eyebrow treatment
-    # above: the reference style's facial marks read as confident brush
-    # strokes (thicker mid-stroke, thinning toward each end), not a
-    # uniform-diameter line -- this was the one facial mark still drawn at
-    # constant width.
-    img = draw_tapered_stroke(img, list(zip(xs, ys)), mid_width=line_width + 2, end_width=max(1, line_width - 1.5))
+    # Constant-width with round caps, not tapered -- a direct correction
+    # said the tapered facial marks (thin-to-thick-to-thin) read wrong,
+    # the lines should be a consistent circular-cap stroke throughout
+    # instead. draw_smooth_open_stroke already draws round caps (an
+    # ellipse at each endpoint), it just doesn't vary the width along
+    # the path the way draw_tapered_stroke does.
+    img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
 
-    # A short philtrum tick between nose and mouth -- the reference style
-    # includes it as a small, clearly separated mark, not touching the
-    # nose curve above it (touching is what read as one continuous
-    # vertical "bridge" stroke in an earlier version).
-    # ys isn't necessarily ordered left-to-right along x (the vtraced arc's
-    # point order follows the traced path, not x-position), so take the
-    # y at whichever traced point sits closest to the philtrum landmark's
-    # x, rather than assuming the middle array index is the visual center.
-    nose_center_y = ys[np.argmin(np.abs(np.asarray(xs) - landmarks[2].x * w))]
-    gap = eye_span * 0.05
-    philtrum_len = eye_span * 0.06
-    philtrum_top = (landmarks[2].x * w, nose_center_y + gap)
-    philtrum_bottom = (landmarks[2].x * w, nose_center_y + gap + philtrum_len)
-    img = draw_smooth_open_stroke(img, [philtrum_top, philtrum_bottom], width=max(1, line_width - 1))
+    # No philtrum tick -- removed per direct feedback ("that weird line
+    # below the nose").
 
     # Mouth: a single curve through the real outer-lip landmarks (mouth
     # corners to cupid's bow). An earlier version added a second, shorter
@@ -1800,14 +1795,10 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
     upts = np.stack([raw_pts[:, 0], leveled_y + ripple + mouth_shift], axis=1)
     utck, _ = splprep([upts[:, 0], upts[:, 1]], s=0, k=3)
     uxs, uys = splev(np.linspace(0, 1, 40), utck)
-    # Same brush-stroke taper as the eyebrows/nose -- thicker through the
-    # middle of the mouth, thinning toward each corner, instead of a
-    # uniform-diameter line. Wider than the nose/eyebrow taper (+3 vs +2)
-    # since the mouth was still reading noticeably thinner than the nose
-    # directly above it even at the same nominal width -- the mouth's
-    # longer, gentler curve has less apparent "ink" per unit length than
-    # the nose's tighter one at an identical stroke radius.
-    img = draw_tapered_stroke(img, list(zip(uxs, uys)), mid_width=line_width + 3, end_width=max(1, line_width - 0.5))
+    # Constant-width with round caps, not tapered -- same direct
+    # correction as the nose above: a consistent circular-cap stroke,
+    # not a thin-to-thick-to-thin taper.
+    img = draw_smooth_open_stroke(img, list(zip(uxs, uys)), width=line_width)
 
     # A small interior fold line in each visible ear -- reference avatars
     # consistently mark a single curve suggesting the tragus/antihelix
