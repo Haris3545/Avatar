@@ -790,6 +790,105 @@ def draw_hair_strands(canvas: Image.Image, hair_outer_contours, detail_width: fl
     return canvas
 
 
+def hair_highlight_lines(gray: np.ndarray, hair_mask: np.ndarray, pitch: float = 8, level: int = 115, max_lines: int = 8):
+    """Real photo-derived hair highlight strokes, replacing draw_hair_strands'
+    fixed evenly-spaced streak positions with ones anchored to wherever
+    THIS photo's hair is actually brightest. Uses the `hatched` package
+    (a real hatching/engraving-line generator) on the photo's own hair
+    luminance rather than guessing where a highlight "should" go.
+
+    hatched 0.2.0 crashes unconditionally against numpy>=2 (an empty
+    numpy array's ambiguous truth value in its MultiLineString(np.empty(...))
+    idiom, which was silently falsy on the older numpy it was written
+    against) -- not anything specific to this input. Patched once, on
+    the module's own MultiLineString reference, rather than pinning an
+    older numpy the rest of the pipeline doesn't need.
+
+    Kept sparse on purpose (max_lines caps it, and a single high
+    brightness threshold only fires on the real highlight band) --
+    a prior direct comparison against the reference avatars found they
+    use a handful of crown highlight cuts, not dense hatching across the
+    whole hair mass, and this keeps that same sparse-cut spirit, just
+    aimed at the photo's real highlight instead of a fixed position."""
+    import cv2
+
+    if not hair_mask.any():
+        return []
+
+    import hatched.hatched as _hm
+
+    if not getattr(_hm, "_avatar_empty_mls_patched", False):
+        _orig_mls = _hm.MultiLineString
+
+        def _safe_mls(lines=None):
+            if lines is not None and hasattr(lines, "shape") and lines.shape[0] == 0:
+                lines = []
+            return _orig_mls(lines) if lines is not None else _orig_mls()
+
+        _hm.MultiLineString = _safe_mls
+        _hm._avatar_empty_mls_patched = True
+    import hatched
+
+    ys, xs = np.where(hair_mask)
+    y0, y1, x0, x1 = int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max())
+    crop_mask = hair_mask[y0 : y1 + 1, x0 : x1 + 1]
+    if not crop_mask.any():
+        return []
+    crop_gray = gray[y0 : y1 + 1, x0 : x1 + 1].astype(np.uint8).copy()
+    # Outside the hair mask but inside its bounding-box crop (e.g. a gap
+    # between two hair lobes) gets flattened to the hair's own mean tone
+    # so it can't register as a false highlight -- clipping to the real
+    # contour below is what ultimately guarantees no line lands there,
+    # this just keeps the hatch algorithm's own analysis from being
+    # skewed by whatever happened to be in the crop rectangle.
+    crop_gray[~crop_mask] = int(crop_gray[crop_mask].mean())
+
+    import tempfile
+    import os
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    try:
+        cv2.imwrite(tmp_path, crop_gray)
+        mls = hatched.hatch(
+            tmp_path, hatch_pitch=pitch, levels=(level,), blur_radius=4,
+            invert=True, hatch_angle=25, show_plot=False, save_svg=False,
+        )
+    finally:
+        os.unlink(tmp_path)
+
+    if not mls.geoms:
+        return []
+
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    contours_cv, _ = cv2.findContours(crop_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    polys = [Polygon(c.reshape(-1, 2)) for c in contours_cv if len(c) >= 3]
+    polys = [p for p in polys if p.is_valid and p.area > 0]
+    if not polys:
+        return []
+    # Shrink a couple pixels so a highlight line can't touch/cross the
+    # outer stroke that's about to be drawn around the same silhouette.
+    hair_poly = unary_union(polys).buffer(-2)
+    if hair_poly.is_empty:
+        return []
+
+    lines = []
+    for line in mls.geoms:
+        clipped = line.intersection(hair_poly)
+        if clipped.is_empty:
+            continue
+        geoms = clipped.geoms if hasattr(clipped, "geoms") else [clipped]
+        for g in geoms:
+            if g.length < pitch * 0.6:
+                continue
+            lines.append(([(px + x0, py + y0) for px, py in g.coords], g.length))
+
+    lines.sort(key=lambda t: -t[1])
+    return [pts for pts, _ in lines[:max_lines]]
+
+
 def draw_smooth_fills(canvas: Image.Image, contours, fill=(0, 0, 0), supersample: int = 6) -> Image.Image:
     """Fill each smoothed contour as a solid polygon instead of pasting a
     mask's raw pixels, so the fill's own edge is fluid and anti-aliased
@@ -1159,12 +1258,26 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     out_im = draw_smooth_strokes(out_im, clothes_outer, width=outline_width)
     out_im = draw_smooth_strokes(out_im, clothes_holes, width=outline_width)
     out_im = draw_collar_hint(out_im, clothes_outer, detail_width)
-    out_im = draw_hair_strands(out_im, hair_outer, detail_width=detail_width)
     # No dense interior hatching: none of the reference avatars actually
     # use it (that was a misreading of a couple of naturally lighter-
-    # haired references) -- a handful of crown tufts from
-    # draw_hair_strands above is the full extent of hair texture in the
-    # house style, not additional hatching strokes across the whole mass.
+    # haired references) -- a handful of crown highlight cuts is the
+    # full extent of hair texture in the house style, not additional
+    # hatching strokes across the whole mass. hair_highlight_lines keeps
+    # that same sparse-cut spirit but anchors the cuts to wherever this
+    # photo's hair is actually brightest instead of 3 fixed, evenly-
+    # spaced positions that had no relationship to the real photo. Falls
+    # back to the old fixed-position strands if hatching fails for any
+    # reason (e.g. a hair region too small/oddly shaped to crop).
+    try:
+        highlight_lines = hair_highlight_lines(gray, hair_only)
+    except Exception as e:
+        print(f"Hair highlight hatching failed ({e}); falling back to fixed strand positions")
+        highlight_lines = None
+    if highlight_lines:
+        for pts in highlight_lines:
+            out_im = draw_pointed_stroke(out_im, pts, base_width=detail_width * 0.8, fill=(255, 255, 255))
+    else:
+        out_im = draw_hair_strands(out_im, hair_outer, detail_width=detail_width)
 
     return np.array(out_im), foreground, gray, hair_clothes
 
@@ -1467,7 +1580,12 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
         pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in nose_bottom_idx])
         tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
         xs, ys = splev(np.linspace(0.0, 1.0, 60), tck)
-    img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
+    # Tapered rather than constant-width, matching the eyebrow treatment
+    # above: the reference style's facial marks read as confident brush
+    # strokes (thicker mid-stroke, thinning toward each end), not a
+    # uniform-diameter line -- this was the one facial mark still drawn at
+    # constant width.
+    img = draw_tapered_stroke(img, list(zip(xs, ys)), mid_width=line_width + 1, end_width=max(1, line_width - 1))
 
     # A short philtrum tick between nose and mouth -- the reference style
     # includes it as a small, clearly separated mark, not touching the
@@ -1533,7 +1651,10 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
     upts = np.stack([raw_pts[:, 0], leveled_y + ripple + mouth_shift], axis=1)
     utck, _ = splprep([upts[:, 0], upts[:, 1]], s=0, k=3)
     uxs, uys = splev(np.linspace(0, 1, 40), utck)
-    img = draw_smooth_open_stroke(img, list(zip(uxs, uys)), width=line_width)
+    # Same brush-stroke taper as the eyebrows/nose -- thicker through the
+    # middle of the mouth, thinning toward each corner, instead of a
+    # uniform-diameter line.
+    img = draw_tapered_stroke(img, list(zip(uxs, uys)), mid_width=line_width + 1, end_width=max(1, line_width - 1))
 
     return np.array(img)
 
