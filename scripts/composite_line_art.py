@@ -399,18 +399,24 @@ def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
         pupil_r = max(eye_width * 0.12, 2)
         img = draw_smooth_dot(img, cx, cy, pupil_r)
 
-        # Upper eyelid: a short, thick horizontal tick directly above the
-        # pupil -- not a long thin arc spanning the whole eye corner-to-
-        # corner (an earlier version). The confirmed reference style
-        # marks the eyelid with a small, noticeably thick stroke right
-        # over the eyeball, distinct in both length and weight from the
-        # thin eyebrow further above it.
-        # Widened from an earlier 0.16 -- a direct correction against a
-        # real photo traced the eyelid tick noticeably wider than that.
+        # Upper eyelid: a short curved arc directly over the pupil, not a
+        # flat straight bar (the previous version) -- a straight tick with
+        # no curve and a visible gap to the pupil below it reads as an
+        # abstract icon mark, not an eye; a shallow arc that sits close
+        # over the pupil is what actually makes it read as an eyelid with
+        # an eye underneath, matching reference avatars where the pupil
+        # sits snugly inside the lid curve's concavity rather than
+        # floating separately below an unrelated bar. Drawn as a tapered
+        # stroke (thin at the corners, slightly thicker mid-arc) for the
+        # same brush-stroke confidence as the eyebrow above it, and
+        # brought closer to the pupil than the old bar's gap.
         lid_half_w = eye_width * 0.24
-        lid_y = cy - eye_width * 0.22
-        lid_w = max(eye_width * 0.18, 2)
-        img = draw_smooth_open_stroke(img, [(cx - lid_half_w, lid_y), (cx + lid_half_w, lid_y)], width=lid_w)
+        lid_y = cy - eye_width * 0.15
+        lid_w = max(eye_width * 0.16, 2)
+        bulge = eye_width * 0.07
+        arc_t = np.linspace(-1.0, 1.0, 7)
+        arc_pts = [(cx + t * lid_half_w, lid_y - bulge * (1 - t**2)) for t in arc_t]
+        img = draw_tapered_stroke(img, arc_pts, mid_width=lid_w, end_width=max(1, lid_w * 0.5))
 
     return np.array(img)
 
@@ -1377,7 +1383,7 @@ def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.nd
     # fragmented the raw pixels were.
     glasses_raw = glasses_region & foreground & (gray_norm < 120)
     if glasses and glasses_raw.any():
-        glasses_closed = ndimage.binary_closing(glasses_raw, structure=disk(max(2, round(5 * scale))))
+        glasses_closed = ndimage.binary_closing(glasses_raw, structure=disk(max(2, round(3 * scale))))
 
         # A real glasses frame closes into one or two main blobs (the
         # lenses, joined at the bridge or not); other things this same
@@ -1545,8 +1551,36 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
     # eyebrows as a single simple curved stroke, not a thick filled shape
     # (an earlier version of this went bold/flat based on a different,
     # non-representative pair of avatars -- reverted).
+    # Each eyebrow's inner (nose-bridge) end sits close enough to the
+    # glasses frame's own rising bridge curve that a uniform brow_lift
+    # wasn't enough to clear it there -- confirmed directly against a
+    # render, the two independently-traced lines (eyebrow stroke, frame
+    # contour) crossed at a shallow angle right at that inner corner,
+    # producing a thin doubled "fork" for a few pixels rather than either
+    # running clear of the other. An extra lift that only applies near
+    # the bridge (decaying to nothing by the outer/temple end, which was
+    # already clear) pushes just that corner up without changing the
+    # eyebrow's shape or position anywhere else.
+    # Lifting the inner end (tried first) reduced but didn't reliably
+    # clear the fork -- with two independently-traced lines (this stroke,
+    # the frame contour from a completely separate brightness threshold),
+    # no amount of nudging one guarantees they won't still graze each
+    # other at some point along their length, and each near-miss shows up
+    # as a thin doubled seam (their anti-aliased edges sit adjacent but
+    # not identical, rather than one clean overlap). Trimming the
+    # eyebrow's own inner-most point instead removes the possibility
+    # entirely -- it just doesn't reach far enough inward to be near the
+    # frame at all, leaving a small natural gap rather than a near-miss.
+    bridge_x = landmarks[168].x * w
     for conns in (connections.FACE_LANDMARKS_LEFT_EYEBROW, connections.FACE_LANDMARKS_RIGHT_EYEBROW):
-        pts = [(px, py - brow_lift) for px, py in ordered_points(conns)]
+        raw_pts = ordered_points(conns)
+        # Whichever end (start or end of the walk) sits closer to the
+        # nose bridge is the inner end -- drop its last one or two points.
+        if abs(raw_pts[0][0] - bridge_x) < abs(raw_pts[-1][0] - bridge_x):
+            raw_pts = raw_pts[2:]
+        else:
+            raw_pts = raw_pts[:-2]
+        pts = [(px, py - brow_lift) for px, py in raw_pts]
         img = draw_tapered_stroke(img, pts, mid_width=detail_width + 1, end_width=max(1, detail_width - 1))
 
     # Just the line under the nose (nostril hook to nostril hook), not the
@@ -1585,7 +1619,7 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
     # strokes (thicker mid-stroke, thinning toward each end), not a
     # uniform-diameter line -- this was the one facial mark still drawn at
     # constant width.
-    img = draw_tapered_stroke(img, list(zip(xs, ys)), mid_width=line_width + 1, end_width=max(1, line_width - 1))
+    img = draw_tapered_stroke(img, list(zip(xs, ys)), mid_width=line_width + 2, end_width=max(1, line_width - 1.5))
 
     # A short philtrum tick between nose and mouth -- the reference style
     # includes it as a small, clearly separated mark, not touching the
@@ -1647,14 +1681,42 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
     # the seam (natural lip texture) that the leveled curve, drawn through
     # only 11 points and splined exactly, was smoothing away -- a light
     # synthetic ripple restores that texture without needing more landmarks.
-    ripple = np.sin(t * np.pi * 3) * (eye_span * 0.012)
+    # Reduced from 0.012 -- direct comparison against the nose line right
+    # above it showed the ripple's wobble was making the mouth read as
+    # thin/uncertain next to the nose's confident taper, an optical effect
+    # of the wobble rather than the actual stroke width. A gentler ripple
+    # keeps the lip texture without undercutting the stroke's confidence.
+    ripple = np.sin(t * np.pi * 3) * (eye_span * 0.006)
     upts = np.stack([raw_pts[:, 0], leveled_y + ripple + mouth_shift], axis=1)
     utck, _ = splprep([upts[:, 0], upts[:, 1]], s=0, k=3)
     uxs, uys = splev(np.linspace(0, 1, 40), utck)
     # Same brush-stroke taper as the eyebrows/nose -- thicker through the
     # middle of the mouth, thinning toward each corner, instead of a
-    # uniform-diameter line.
-    img = draw_tapered_stroke(img, list(zip(uxs, uys)), mid_width=line_width + 1, end_width=max(1, line_width - 1))
+    # uniform-diameter line. Wider than the nose/eyebrow taper (+3 vs +2)
+    # since the mouth was still reading noticeably thinner than the nose
+    # directly above it even at the same nominal width -- the mouth's
+    # longer, gentler curve has less apparent "ink" per unit length than
+    # the nose's tighter one at an identical stroke radius.
+    img = draw_tapered_stroke(img, list(zip(uxs, uys)), mid_width=line_width + 3, end_width=max(1, line_width - 0.5))
+
+    # A small interior fold line in each visible ear -- reference avatars
+    # consistently mark a single curve suggesting the tragus/antihelix
+    # rather than leaving the ear as a bare outline, which reads as flat
+    # and empty by comparison. There's no MediaPipe ear landmark to trace
+    # a real fold from, so this is a stylized accent (like the philtrum
+    # tick above) sized and anchored off the nearest face-oval landmark
+    # (234/454, right at the cheek/ear boundary) rather than a claim about
+    # this specific ear's actual anatomy -- small and centered enough on
+    # that landmark to stay inside the visible ear silhouette rather than
+    # risk poking out into the hair or cheek.
+    for lid, side in ((234, -1), (454, 1)):
+        lm = landmarks[lid]
+        ex, ey = lm.x * w, lm.y * h
+        fold_len = eye_span * 0.09
+        fold_bow = eye_span * 0.03
+        t = np.linspace(-1.0, 1.0, 5)
+        fold_pts = [(ex + side * fold_bow * (1 - tt**2), ey + tt * fold_len * 0.5) for tt in t]
+        img = draw_smooth_open_stroke(img, fold_pts, width=max(1, line_width - 1))
 
     return np.array(img)
 
