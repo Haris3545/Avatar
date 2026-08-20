@@ -68,8 +68,8 @@ BACKGROUND, HAIR, BODY_SKIN, FACE_SKIN, CLOTHES, OTHER = range(6)
 # weight for interior facial detail (eyebrows, nose, mouth, eyes, glasses).
 # Centralized here instead of a magic number at each call site so the two
 # bands stay in sync as the style gets tuned.
-OUTLINE_WIDTH = 5
-DETAIL_WIDTH = 3
+OUTLINE_WIDTH = 7
+DETAIL_WIDTH = 5
 # The widths above were tuned by eye against a ~900px-tall photo. Source
 # headshots range from 200px thumbnails to 1300px photos, and a fixed pixel
 # width doesn't track that: on a small photo the face (and especially small
@@ -732,6 +732,65 @@ def jag_fringe(contour: np.ndarray, n_teeth: int = 6, depth_frac: float = 0.012)
 
 
 
+def draw_hair_flow_lines(canvas: Image.Image, hair_outer_contours, hair_fill, detail_width: float = DETAIL_WIDTH):
+    """Long, confident directional strand lines instead of the earlier
+    rejected pale cut-marks (both the fixed 3-strand version and the
+    photo-derived hatched-highlight version read as odd pale patches
+    breaking up the solid hair mass on sight, not as a shine/highlight
+    cue -- see the removed draw_hair_strands/hair_highlight_lines).
+
+    Insets of the hair silhouette's own upper curve (parallel offsets
+    toward its centroid) instead of independently-invented strand paths --
+    real hair layers near the crown roughly parallel the outer silhouette,
+    so tracing concentric insets of a shape that's already this specific
+    photo's actual hair silhouette gives lines with real directional
+    structure for free, rather than a plausible-looking but arbitrary
+    flow field. Drawn as a mid-tone between the hair fill and black (not
+    white) so they read as strand structure within the mass, the same way
+    the reference avatars' hair linework does, rather than as a cut into
+    it."""
+    if not hair_outer_contours:
+        return canvas
+
+    contour = max(
+        hair_outer_contours,
+        key=lambda c: (c[:, 0].max() - c[:, 0].min()) * (c[:, 1].max() - c[:, 1].min()),
+    )
+    top_y = contour[:, 1].min()
+    bbox_h = contour[:, 1].max() - top_y
+    cx, cy = contour[:, 0].mean(), contour[:, 1].mean()
+
+    # Only the upper ~55% (crown down to roughly ear height) -- the lower
+    # portion is the sideburn/nape area, thin and already close to the
+    # outer edge, where an inset line would crowd the silhouette stroke
+    # rather than read as interior structure. Longest contiguous run in
+    # real path order (same technique used for the nose/collar arcs
+    # elsewhere), not a naive x-sort, since the contour can wrap.
+    in_band = contour[:, 1] < top_y + bbox_h * 0.55
+    if in_band.sum() < 10:
+        return canvas
+    n = len(contour)
+    idx2 = np.concatenate([np.where(in_band)[0], np.where(in_band)[0] + n])
+    splits = np.where(np.diff(idx2) > 1)[0]
+    run_starts = np.concatenate([[0], splits + 1])
+    run_ends = np.concatenate([splits, [len(idx2) - 1]])
+    best = np.argmax(run_ends - run_starts)
+    best_idx = idx2[run_starts[best]:run_ends[best] + 1] % n
+    band = contour[best_idx]
+
+    line_color = tuple(min(int(v * 1.9 + 10), 90) for v in hair_fill)
+    for inset_frac in (0.06, 0.13, 0.21):
+        inset = bbox_h * inset_frac
+        pts = []
+        for px, py in band:
+            dx, dy = cx - px, cy - py
+            norm = max((dx**2 + dy**2) ** 0.5, 1)
+            pts.append((px + dx / norm * inset, py + dy / norm * inset))
+        canvas = draw_smooth_open_stroke(canvas, pts, width=max(1, detail_width - 1), fill=line_color)
+
+    return canvas
+
+
 def draw_smooth_fills(canvas: Image.Image, contours, fill=(0, 0, 0), supersample: int = 6) -> Image.Image:
     """Fill each smoothed contour as a solid polygon instead of pasting a
     mask's raw pixels, so the fill's own edge is fluid and anti-aliased
@@ -1150,14 +1209,7 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     out_im = draw_smooth_strokes(out_im, clothes_outer, width=outline_width)
     out_im = draw_smooth_strokes(out_im, clothes_holes, width=outline_width)
     out_im = draw_collar_hint(out_im, clothes_outer, detail_width)
-    # No white cut-marks in the hair fill at all -- both the fixed-position
-    # strands (draw_hair_strands) and the photo-derived hatched highlights
-    # (hair_highlight_lines) were rejected on sight (they read as odd pale
-    # patches breaking up the solid hair mass, not as a shine/highlight
-    # cue). Both functions, and the hatched/shapely-based logic behind the
-    # second one, were removed entirely rather than just unwired -- if
-    # hair texture comes back later it should be a fresh design, not a
-    # revival of either rejected approach.
+    out_im = draw_hair_flow_lines(out_im, hair_outer, hair_fill, detail_width=detail_width)
 
     return np.array(out_im), foreground, gray, hair_clothes
 
@@ -1657,6 +1709,21 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
         pts = np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in nose_bottom_idx])
         tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
         xs, ys = splev(np.linspace(0.0, 1.0, 60), tck)
+
+    # Trimmed to roughly the middle 3/5ths of its own width -- a direct
+    # style comparison against a reference avatar showed the nose there
+    # is deliberately less descriptive than a corner-to-corner trace,
+    # covering only the central portion rather than the full nostril-to-
+    # nostril span. xs isn't necessarily sorted (it follows the traced
+    # arc's real path order), so filter by x-range rather than by index;
+    # the arc is monotonic enough in x that this still leaves a
+    # contiguous, sensibly-ordered middle run for the tapered stroke
+    # below to draw as one continuous line.
+    xs, ys = np.asarray(xs), np.asarray(ys)
+    x_span = xs.max() - xs.min()
+    keep = (xs > xs.min() + x_span * 0.2) & (xs < xs.max() - x_span * 0.2)
+    if keep.sum() >= 2:
+        xs, ys = xs[keep], ys[keep]
     # Tapered rather than constant-width, matching the eyebrow treatment
     # above: the reference style's facial marks read as confident brush
     # strokes (thicker mid-stroke, thinning toward each end), not a
