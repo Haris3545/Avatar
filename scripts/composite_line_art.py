@@ -704,32 +704,6 @@ def draw_smooth_dot(canvas: Image.Image, cx: float, cy: float, radius: float, fi
     return canvas
 
 
-def draw_pointed_stroke(canvas: Image.Image, points, base_width: float, fill=(0, 0, 0), supersample: int = 6) -> Image.Image:
-    """Draw an open stroke that starts at base_width and tapers linearly to
-    a fine point at its last point -- for a hair strand escaping the solid
-    fill (thick where it leaves the scalp, tapering to nothing at the tip),
-    unlike draw_tapered_stroke's symmetric thick-middle taper for eyebrows."""
-    if len(points) < 2:
-        return canvas
-
-    w, h = canvas.size
-    big = Image.new("RGBA", (w * supersample, h * supersample), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(big)
-    n = len(points)
-    for i, (px, py) in enumerate(points):
-        t = i / (n - 1)
-        radius = base_width / 2 * (1 - t) * supersample
-        sx, sy = px * supersample, py * supersample
-        draw.ellipse([sx - radius, sy - radius, sx + radius, sy + radius], fill=fill + (255,))
-        if i > 0:
-            px0, py0 = points[i - 1]
-            draw.line([(px0 * supersample, py0 * supersample), (sx, sy)], fill=fill + (255,), width=max(int(radius * 1.6), 1))
-
-    big = big.resize((w, h), Image.LANCZOS)
-    canvas.paste(big, (0, 0), big)
-    return canvas
-
-
 def jag_fringe(contour: np.ndarray, n_teeth: int = 6, depth_frac: float = 0.012) -> np.ndarray:
     """Perturb the top band of a hair contour with a few deliberate pointed
     teeth -- a fixed-frequency sine ripple, not random noise, so it reads
@@ -756,143 +730,6 @@ def jag_fringe(contour: np.ndarray, n_teeth: int = 6, depth_frac: float = 0.012)
 
     return canvas
 
-
-def draw_hair_strands(canvas: Image.Image, hair_outer_contours, detail_width: float = DETAIL_WIDTH, n_strands: int = 3) -> Image.Image:
-    """A small number of thin white shine/highlight streaks cut into the
-    solid hair fill near the fringe -- negative-space gaps, not strands
-    drawn on top. Matches the confirmed reference style: a few short white
-    cuts breaking the crown edge read as movement/shine, unlike an earlier
-    version of this that drew dark tapered strokes escaping past the
-    silhouette edge, which doesn't match. Each streak starts at the
-    fringe/crown boundary and cuts a short way *into* the fill (toward
-    increasing y, since that boundary is the hair's top edge), not beyond
-    it."""
-    if not hair_outer_contours:
-        return canvas
-
-    contour = max(
-        hair_outer_contours,
-        key=lambda c: (c[:, 0].max() - c[:, 0].min()) * (c[:, 1].max() - c[:, 1].min()),
-    )
-    top_y = contour[:, 1].min()
-    bbox_h = contour[:, 1].max() - top_y
-    cx = contour[:, 0].mean()
-
-    near_top = contour[contour[:, 1] < top_y + bbox_h * 0.12]
-    if len(near_top) < n_strands:
-        return canvas
-    near_top = near_top[np.argsort(near_top[:, 0])]
-    idxs = np.linspace(0, len(near_top) - 1, n_strands).astype(int)
-
-    for idx in idxs:
-        bx, by = near_top[idx]
-        dx = 1.0 if bx >= cx else -1.0
-        length = bbox_h * 0.16
-        base = (bx, by)
-        mid = (bx + dx * length * 0.12, by + length * 0.5)
-        tip = (bx + dx * length * 0.25, by + length * 0.9)
-        canvas = draw_pointed_stroke(canvas, [base, mid, tip], base_width=detail_width * 0.8, fill=(255, 255, 255))
-
-    return canvas
-
-
-def hair_highlight_lines(gray: np.ndarray, hair_mask: np.ndarray, pitch: float = 8, level: int = 115, max_lines: int = 8):
-    """Real photo-derived hair highlight strokes, replacing draw_hair_strands'
-    fixed evenly-spaced streak positions with ones anchored to wherever
-    THIS photo's hair is actually brightest. Uses the `hatched` package
-    (a real hatching/engraving-line generator) on the photo's own hair
-    luminance rather than guessing where a highlight "should" go.
-
-    hatched 0.2.0 crashes unconditionally against numpy>=2 (an empty
-    numpy array's ambiguous truth value in its MultiLineString(np.empty(...))
-    idiom, which was silently falsy on the older numpy it was written
-    against) -- not anything specific to this input. Patched once, on
-    the module's own MultiLineString reference, rather than pinning an
-    older numpy the rest of the pipeline doesn't need.
-
-    Kept sparse on purpose (max_lines caps it, and a single high
-    brightness threshold only fires on the real highlight band) --
-    a prior direct comparison against the reference avatars found they
-    use a handful of crown highlight cuts, not dense hatching across the
-    whole hair mass, and this keeps that same sparse-cut spirit, just
-    aimed at the photo's real highlight instead of a fixed position."""
-    import cv2
-
-    if not hair_mask.any():
-        return []
-
-    import hatched.hatched as _hm
-
-    if not getattr(_hm, "_avatar_empty_mls_patched", False):
-        _orig_mls = _hm.MultiLineString
-
-        def _safe_mls(lines=None):
-            if lines is not None and hasattr(lines, "shape") and lines.shape[0] == 0:
-                lines = []
-            return _orig_mls(lines) if lines is not None else _orig_mls()
-
-        _hm.MultiLineString = _safe_mls
-        _hm._avatar_empty_mls_patched = True
-    import hatched
-
-    ys, xs = np.where(hair_mask)
-    y0, y1, x0, x1 = int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max())
-    crop_mask = hair_mask[y0 : y1 + 1, x0 : x1 + 1]
-    if not crop_mask.any():
-        return []
-    crop_gray = gray[y0 : y1 + 1, x0 : x1 + 1].astype(np.uint8).copy()
-    # Outside the hair mask but inside its bounding-box crop (e.g. a gap
-    # between two hair lobes) gets flattened to the hair's own mean tone
-    # so it can't register as a false highlight -- clipping to the real
-    # contour below is what ultimately guarantees no line lands there,
-    # this just keeps the hatch algorithm's own analysis from being
-    # skewed by whatever happened to be in the crop rectangle.
-    crop_gray[~crop_mask] = int(crop_gray[crop_mask].mean())
-
-    import tempfile
-    import os
-
-    fd, tmp_path = tempfile.mkstemp(suffix=".png")
-    os.close(fd)
-    try:
-        cv2.imwrite(tmp_path, crop_gray)
-        mls = hatched.hatch(
-            tmp_path, hatch_pitch=pitch, levels=(level,), blur_radius=4,
-            invert=True, hatch_angle=25, show_plot=False, save_svg=False,
-        )
-    finally:
-        os.unlink(tmp_path)
-
-    if not mls.geoms:
-        return []
-
-    from shapely.geometry import Polygon
-    from shapely.ops import unary_union
-
-    contours_cv, _ = cv2.findContours(crop_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    polys = [Polygon(c.reshape(-1, 2)) for c in contours_cv if len(c) >= 3]
-    polys = [p for p in polys if p.is_valid and p.area > 0]
-    if not polys:
-        return []
-    # Shrink a couple pixels so a highlight line can't touch/cross the
-    # outer stroke that's about to be drawn around the same silhouette.
-    hair_poly = unary_union(polys).buffer(-2)
-    if hair_poly.is_empty:
-        return []
-
-    lines = []
-    for line in mls.geoms:
-        clipped = line.intersection(hair_poly)
-        if clipped.is_empty:
-            continue
-        geoms = clipped.geoms if hasattr(clipped, "geoms") else [clipped]
-        for g in geoms:
-            if g.length < pitch * 0.6:
-                continue
-            lines.append(([(px + x0, py + y0) for px, py in g.coords], g.length))
-
-    lines.sort(key=lambda t: -t[1])
-    return [pts for pts, _ in lines[:max_lines]]
 
 
 def draw_smooth_fills(canvas: Image.Image, contours, fill=(0, 0, 0), supersample: int = 6) -> Image.Image:
@@ -1010,7 +847,27 @@ def draw_clothes_shading(canvas: Image.Image, clothes_only: np.ndarray, gray: np
     dark_clothes = ndimage.binary_opening(dark_clothes, structure=cleanup)
 
     dark_contours = smooth_contours(dark_clothes, min_area_frac=0.01, smoothing=2.0)
-    return draw_smooth_fills(canvas, dark_contours, fill=CLOTHES_SHADOW_FILL)
+    canvas = draw_smooth_fills(canvas, dark_contours, fill=CLOTHES_SHADOW_FILL)
+
+    # A second, deeper threshold band traced as a thin line (not filled)
+    # instead of another flat patch -- garment folds are gradual shading
+    # transitions, and one flat shadow shape only shows where the darkest
+    # half is, not any structure within it. This is the same blur radius
+    # already tuned to survive a busy fabric print (confirmed directly: a
+    # plain Canny edge pass on this same blurred image mostly just found
+    # the silhouette's own edge against the background, not interior
+    # shading, on a dark, low-contrast, patterned shirt -- the print's
+    # texture and the real lighting gradient are both too subtle there
+    # for a generic edge detector to tell apart). Reusing the blur that
+    # already isolates the real lighting gradient and tracing one more of
+    # its own threshold bands as a line is a smaller, more reliable step
+    # than asking edge detection to find fold structure from scratch.
+    deep = np.percentile(blurred[clothes_only], 30)
+    deep_clothes = clothes_only & (blurred <= deep)
+    deep_clothes = ndimage.binary_closing(deep_clothes, structure=cleanup)
+    deep_clothes = ndimage.binary_opening(deep_clothes, structure=cleanup)
+    deep_contours = smooth_contours(deep_clothes, min_area_frac=0.015, smoothing=2.5)
+    return draw_smooth_strokes(canvas, deep_contours, width=1)
 
 
 def reveal_ears(hair_clothes: np.ndarray, cat_mask: np.ndarray, im: Image.Image, landmarks, w: int, h: int, search_frac: float = 0.35) -> np.ndarray:
@@ -1264,26 +1121,14 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     out_im = draw_smooth_strokes(out_im, clothes_outer, width=outline_width)
     out_im = draw_smooth_strokes(out_im, clothes_holes, width=outline_width)
     out_im = draw_collar_hint(out_im, clothes_outer, detail_width)
-    # No dense interior hatching: none of the reference avatars actually
-    # use it (that was a misreading of a couple of naturally lighter-
-    # haired references) -- a handful of crown highlight cuts is the
-    # full extent of hair texture in the house style, not additional
-    # hatching strokes across the whole mass. hair_highlight_lines keeps
-    # that same sparse-cut spirit but anchors the cuts to wherever this
-    # photo's hair is actually brightest instead of 3 fixed, evenly-
-    # spaced positions that had no relationship to the real photo. Falls
-    # back to the old fixed-position strands if hatching fails for any
-    # reason (e.g. a hair region too small/oddly shaped to crop).
-    try:
-        highlight_lines = hair_highlight_lines(gray, hair_only)
-    except Exception as e:
-        print(f"Hair highlight hatching failed ({e}); falling back to fixed strand positions")
-        highlight_lines = None
-    if highlight_lines:
-        for pts in highlight_lines:
-            out_im = draw_pointed_stroke(out_im, pts, base_width=detail_width * 0.8, fill=(255, 255, 255))
-    else:
-        out_im = draw_hair_strands(out_im, hair_outer, detail_width=detail_width)
+    # No white cut-marks in the hair fill at all -- both the fixed-position
+    # strands (draw_hair_strands) and the photo-derived hatched highlights
+    # (hair_highlight_lines) were rejected on sight (they read as odd pale
+    # patches breaking up the solid hair mass, not as a shine/highlight
+    # cue). Both functions, and the hatched/shapely-based logic behind the
+    # second one, were removed entirely rather than just unwired -- if
+    # hair texture comes back later it should be a fresh design, not a
+    # revival of either rejected approach.
 
     return np.array(out_im), foreground, gray, hair_clothes
 
@@ -1383,7 +1228,32 @@ def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.nd
     # fragmented the raw pixels were.
     glasses_raw = glasses_region & foreground & (gray_norm < 120)
     if glasses and glasses_raw.any():
-        glasses_closed = ndimage.binary_closing(glasses_raw, structure=disk(max(2, round(3 * scale))))
+        # A lens glare/reflection can break the frame's brightness
+        # threshold into two genuinely disconnected pieces with a real
+        # gap between them (confirmed directly: bright, up to fully-white
+        # pixels sitting right in the middle of the frame line). Closing
+        # wide enough to bridge that (~20px) then eroding back down was
+        # tried and erased the frame outright -- the frame's own raw line
+        # is only a few px thick, so an erosion sized to undo a 9px
+        # closing eats straight through it, not just the extra gap-filled
+        # width. A small closing first (radius 3*scale, the same one that
+        # fixed the over-thick bridge) keeps the frame's real thickness
+        # everywhere it isn't broken. Any piece that breaks off near the
+        # main frame (a lower area threshold than before, 2% instead of
+        # 15%, so a genuine broken-off frame fragment isn't discarded as
+        # noise the way the earlier threshold would) gets unioned back in
+        # at its own true thickness, and only then does one moderate
+        # closing bridge the now-much-smaller remaining gaps between
+        # those real pieces -- bridging a short real gap between two
+        # already-present fragments, not conjuring 20px of frame from
+        # nothing the way closing the raw broken mask directly required.
+        glasses_small = ndimage.binary_closing(glasses_raw, structure=disk(max(2, round(3 * scale))))
+        labeled, n = ndimage.label(glasses_small)
+        if n > 1:
+            sizes = ndimage.sum(glasses_small, labeled, range(1, n + 1))
+            keep = np.where(sizes >= sizes.max() * 0.02)[0] + 1
+            glasses_small = np.isin(labeled, keep)
+        glasses_closed = ndimage.binary_closing(glasses_small, structure=disk(max(2, round(8 * scale))))
 
         # A real glasses frame closes into one or two main blobs (the
         # lenses, joined at the bridge or not); other things this same
@@ -1447,8 +1317,75 @@ def composite_line_art(photo_path: Path, out_path: Path, glasses: bool = False):
         print("No face detected, skipping face structure lines and dot-eye replacement")
 
     out, _ = crop_to_content(out, foreground)
+    out = vector_retrace(out)
     Image.fromarray(out).save(out_path)
     print(f"Saved to {out_path}")
+
+
+def vector_retrace(out: np.ndarray) -> np.ndarray:
+    """Re-trace the whole flattened composite as one clean vector (vtracer,
+    color mode) and rasterize it back, instead of shipping the raster as
+    each feature independently drew it.
+
+    Every feature above is drawn by its own supersample+Lanczos call,
+    which anti-aliases each stroke against the *canvas so far*, not
+    against every other stroke that will eventually sit next to it. Where
+    two independently-drawn regions come very close without actually
+    touching (a real, recurring case: the jaw outline and the silhouette
+    outline tracing two different masks -- rembg's foreground cutout vs.
+    the segmenter's FACE_SKIN category -- that agree closely but not
+    pixel-for-pixel), each keeps its own separate anti-aliased edge rather
+    than merging into one line, which reads as an unintentional doubled
+    line. Retracing the flattened raster sidesteps that structurally: by
+    this point there's only one pixel grid with one set of boundaries left
+    to find, so two near-coincident edges either have already merged into
+    one solid region (drawn as a single clean line) or they were genuinely
+    separate shapes to begin with (drawn as two) -- there's no longer a
+    "was this one line or two nearly-overlapping lines" ambiguity for the
+    tracer to inherit from how the raster was assembled.
+
+    Falls back to the untraced raster if vtracer/cairosvg aren't available
+    or the retrace fails for any reason, rather than blocking the whole
+    composite on this final polish step."""
+    import tempfile
+    import os
+
+    try:
+        import vtracer
+        import cairosvg
+    except ImportError as e:
+        print(f"vector_retrace skipped (missing dependency: {e})")
+        return out
+
+    h, w = out.shape[:2]
+    fd_png, png_path = tempfile.mkstemp(suffix=".png")
+    os.close(fd_png)
+    fd_svg, svg_path = tempfile.mkstemp(suffix=".svg")
+    os.close(fd_svg)
+    try:
+        Image.fromarray(out).save(png_path)
+        vtracer.convert_image_to_svg_py(
+            png_path, svg_path,
+            colormode="color", hierarchical="stacked", mode="spline",
+            filter_speckle=4, color_precision=6, layer_difference=16,
+            corner_threshold=60, length_threshold=4.0, splice_threshold=45,
+            path_precision=3,
+        )
+        png_bytes = cairosvg.svg2png(url=svg_path, output_width=w, output_height=h, background_color="white")
+        from io import BytesIO
+
+        retraced = np.array(Image.open(BytesIO(png_bytes)).convert("RGB"))
+        if retraced.shape[:2] != (h, w):
+            print(f"vector_retrace: size mismatch after retrace ({retraced.shape[:2]} vs {(h, w)}), keeping raster")
+            return out
+        return retraced
+    except Exception as e:
+        print(f"vector_retrace failed ({e}); keeping raster")
+        return out
+    finally:
+        for p in (png_path, svg_path):
+            if os.path.exists(p):
+                os.unlink(p)
 
 
 def face_skin_contours(cat_mask: np.ndarray):
@@ -1713,7 +1650,7 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
         lm = landmarks[lid]
         ex, ey = lm.x * w, lm.y * h
         fold_len = eye_span * 0.09
-        fold_bow = eye_span * 0.03
+        fold_bow = eye_span * 0.012
         t = np.linspace(-1.0, 1.0, 5)
         fold_pts = [(ex + side * fold_bow * (1 - tt**2), ey + tt * fold_len * 0.5) for tt in t]
         img = draw_smooth_open_stroke(img, fold_pts, width=max(1, line_width - 1))

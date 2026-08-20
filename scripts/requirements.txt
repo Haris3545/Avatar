@@ -9,5 +9,4 @@ google-genai
 vtracer
 svgpathtools
 opencv-contrib-python
-hatched
-shapely
+cairosvg
