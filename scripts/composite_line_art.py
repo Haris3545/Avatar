@@ -945,6 +945,23 @@ def reveal_ears(hair_clothes: np.ndarray, cat_mask: np.ndarray, im: Image.Image,
             sizes = ndimage.sum(ear_notch, labeled, range(1, num + 1))
             ear_notch = labeled == (np.argmax(sizes) + 1)
 
+        # A real, mostly-covered ear (hair falling in front of/beside it,
+        # only a sliver actually visible) produces a notch too thin to
+        # read as an ear once drawn -- it just shows up as a stray narrow
+        # gap of skin between the hair silhouette's outer edge and the
+        # notch's own inner edge, two close-but-not-identical curves that
+        # read as an unintentional doubled line rather than a visible ear
+        # (confirmed directly against a render and the source photo: the
+        # photo does show a bit of ear peeking past the sideburn there,
+        # but not enough to draw cleanly). Below this width, it reads
+        # better to just leave that area covered by hair -- an ear that
+        # isn't drawn at all is a smaller loss than a confusing sliver.
+        if ear_notch.any():
+            notch_ys, notch_xs = np.where(ear_notch)
+            notch_w = notch_xs.max() - notch_xs.min()
+            if notch_w < radius * 0.35:
+                continue
+
         corrected[y0:y1, x0:x1][ear_notch] = False
 
     return corrected
@@ -1082,20 +1099,32 @@ def _base_layers(im: Image.Image, cat_mask: np.ndarray, landmarks=None):
     clothes_outer, clothes_holes = smooth_contours(
         clothes_only, min_area_frac=0.001, include_holes=True, smoothing=1.5
     )
-    # Unlike hair_only/clothes_only just above, this is rembg's own
-    # foreground cutout, not the segmenter's category mask -- rembg is
-    # trained specifically for clean person cutouts, so it stays reliable
-    # even against a noisy background (e.g. a chalkboard) where the
-    # category segmenter's hair boundary genuinely isn't. That means the
-    # jaw/cheek edge here is real measured shape, not segmentation noise --
-    # it's the single feature most responsible for an avatar actually
-    # looking like this specific person (per repeated feedback that jaw
-    # shape is where most of the likeness lives), so it shouldn't get the
-    # same heavy denoising smoothing the genuinely-noisy hair/clothes
-    # edges need. A much lighter pass here still removes pixel jaggedness
-    # without spline-averaging away a jaw angle or chin point into a
-    # generic oval.
-    silhouette_contours = smooth_contours(foreground, smoothing=0.3)
+    # hair_clothes | skin instead of the raw rembg foreground cutout, AND
+    # the same smoothing=1.5 as hair_outer below (was 0.3) -- the jaw/
+    # cheek edge itself is now drawn from face_oval_contour (real
+    # face-mesh geometry, see its docstring), not from this silhouette, so
+    # this only needs to be consistent with the hair/clothes shapes it's
+    # drawn alongside. Switching the mask wasn't sufficient on its own:
+    # checked directly, hair_clothes and hair_only were already pixel-
+    # identical near the ear (0 pixels different), yet the two drawn
+    # lines still visibly diverged there, because smooth_contours' own
+    # smoothing/simplification amount was different between the two
+    # calls (0.3 here vs. 1.5 for hair_outer) -- identical input pixels
+    # still produce two different output curves at two different
+    # smoothing strengths. Matching both removes that second source of
+    # divergence too.
+    # samples=2000 (up from the function's default 400): smooth_contours
+    # resamples each contour to a fixed point count regardless of its
+    # actual perimeter, so a much longer contour (this traces the whole
+    # body outline, several times the perimeter of hair_outer's hair-only
+    # blob) ends up with far sparser points per unit length at the same
+    # sample count. Checked directly: even with identical underlying
+    # pixels and identical smoothing values, the two contours still
+    # visibly diverged near the ear until the point density was also
+    # matched -- spline smoothing behaves differently at different point
+    # densities along the same physical edge, not just at different
+    # smoothing strengths.
+    silhouette_contours = smooth_contours(hair_clothes | skin, smoothing=1.5, samples=2000)
     # A jagged/tufted fringe (see jag_fringe) instead of hair's otherwise
     # smooth spline-fit edge, matching the reference avatars' hairline.
     hair_outer = [jag_fringe(c) for c in hair_outer]
@@ -1186,6 +1215,16 @@ def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.nd
         # for the lens/frame (which sits well inside them) while making it
         # structurally impossible to reach the ear, regardless of how wide
         # any given photo's eyebrow-to-eyebrow span is relative to it.
+        # Widening this margin further (tried 0.11 and 0.18, to keep the
+        # box clear of landmark 234 -- almost the same x as landmark 127,
+        # so a small margin barely moved the boundary) broke the lens
+        # capture itself both times instead of just trimming the temple
+        # overreach -- the lens's own edge sits close enough to that
+        # boundary on this photo that there's no x-only clamp that
+        # separates "lens" from "reaches too far toward the ear." Left at
+        # 0.05 (known to capture the lens reliably) and the temple/hair
+        # overreach is excluded directly below instead, by category
+        # rather than position.
         temple_margin = (max(xs) - min(xs)) * 0.05
         gx0 = max(gx0, landmarks[127].x * w + temple_margin)
         gx1 = min(gx1, landmarks[356].x * w - temple_margin)
@@ -1226,7 +1265,13 @@ def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.nd
     # hollow rounded-rectangle frames instead of a solid dark mass, and
     # guaranteeing the drawn line has no breaks regardless of how
     # fragmented the raw pixels were.
-    glasses_raw = glasses_region & foreground & (gray_norm < 120)
+    # A glasses frame is never classified as HAIR -- excluding that
+    # category directly removes any temple-arm/sideburn overreach at its
+    # actual source (whatever dark pixels the segmenter itself calls
+    # hair) rather than approximating "not hair" with an x-position box,
+    # which broke the lens capture itself when drawn wide enough to
+    # matter (see temple_margin above).
+    glasses_raw = glasses_region & foreground & (gray_norm < 120) & (cat_mask != HAIR)
     if glasses and glasses_raw.any():
         # A lens glare/reflection can break the frame's brightness
         # threshold into two genuinely disconnected pieces with a real
@@ -1304,7 +1349,10 @@ def composite_line_art(photo_path: Path, out_path: Path, glasses: bool = False):
     detail_width = max(1, round(DETAIL_WIDTH * scale))
 
     out_im = Image.fromarray(out)
-    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=detail_width)
+    if landmarks is not None:
+        out_im = draw_smooth_open_stroke(out_im, list(face_oval_contour(landmarks, w, h)), width=detail_width)
+    else:
+        out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=detail_width)
     out_im = draw_dark_face_detail(
         out_im, cat_mask, gray, foreground, landmarks, detail_width=detail_width, scale=scale, glasses=glasses
     )
@@ -1388,16 +1436,74 @@ def vector_retrace(out: np.ndarray) -> np.ndarray:
                 os.unlink(p)
 
 
+def face_oval_contour(landmarks, w: int, h: int):
+    """The real geometric extent of the face from MediaPipe's own 3D face
+    mesh (FACE_OVAL), used for the jaw/cheek outline instead of the
+    segmenter's FACE_SKIN category (see face_skin_contours, kept as the
+    fallback for when no landmarks are available).
+
+    FACE_SKIN correctly excludes the ears -- they aren't face skin -- but
+    using that pixel category as the entire face outline pinches the
+    whole shape in sharply right at ear height, which reads as a
+    narrower, more generic face than the real photo. Confirmed directly:
+    even a very large closing (45px) couldn't bridge that pinch, because
+    it isn't a small gap to bridge -- there's genuinely almost no
+    face-skin-classified pixel immediately beside the ear, so the pinch
+    is topologically real in the 2D pixel category even though it isn't
+    how the actual head reads (the head isn't narrower there, the ear is
+    just a different category). The landmark oval has no such artifact:
+    it's not a pixel category boundary at all, just the face mesh's own
+    geometric estimate of the face's extent, and a direct check against
+    the real photo confirmed it tracks the actual visible face width
+    smoothly past the temple instead of pinching.
+
+    Returns an OPEN arc (temple-height down through the chin and back up
+    to the other temple), not the full closed oval -- the oval's own
+    upper arc crosses the forehead, and unlike FACE_SKIN (which simply
+    has no pixels wherever hair actually covers skin) the landmark oval
+    has no concept of hair coverage at all, so drawing the full loop drew
+    a stray line straight across the forehead through the hair fill
+    (confirmed directly against a render). The hairline is already drawn
+    separately from the hair silhouette's own contour; this only needs
+    to supply the part below that."""
+    from scipy.interpolate import splev, splprep
+
+    order = _ordered_face_oval_indices()
+    pts = np.array([[landmarks[i].x * w, landmarks[i].y * h] for i in order])
+    tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, per=True)
+    xs, ys = splev(np.linspace(0.0, 1.0, 200), tck)
+    full = np.stack([xs, ys], axis=1)
+
+    # landmark 168 sits between the eyebrows, right at brow height -- a
+    # stable, already-used-elsewhere reference for "above here is
+    # forehead, not cheek/temple." Taking the single longest contiguous
+    # run of below-that-height points (same technique used for the nose
+    # and collar arcs elsewhere) rather than a fixed index range, since
+    # FACE_OVAL's point order doesn't start at a guaranteed position.
+    cutoff_y = landmarks[168].y * h
+    below = full[:, 1] > cutoff_y
+    n = len(full)
+    idx2 = np.concatenate([np.where(below)[0], np.where(below)[0] + n])
+    splits = np.where(np.diff(idx2) > 1)[0]
+    run_starts = np.concatenate([[0], splits + 1])
+    run_ends = np.concatenate([splits, [len(idx2) - 1]])
+    best = np.argmax(run_ends - run_starts)
+    best_idx = idx2[run_starts[best]:run_ends[best] + 1] % n
+    return full[best_idx]
+
+
 def face_skin_contours(cat_mask: np.ndarray):
-    """The segmenter's own FACE_SKIN category already traces almost
-    exactly the jawline (see the FACE_SKIN vs BODY_SKIN comparison that
-    motivated this) -- a real semantic distinction it learned (face vs
-    neck), not a blind local pixel search. Using it directly beats
-    reconstructing the same boundary from a landmark position and
-    gradient-snapping along a short search line, which has no such
-    understanding and can grab a stronger but wrong nearby edge (glasses,
-    a collar seam, a shirt pattern) instead of the real, sometimes subtle,
-    jaw shadow.
+    """Fallback jaw/cheek outline for when no face landmarks are
+    available (face_oval_contour is preferred whenever they are -- see
+    its docstring for why). The segmenter's own FACE_SKIN category
+    traces almost exactly the jawline (see the FACE_SKIN vs BODY_SKIN
+    comparison that motivated this) -- a real semantic distinction it
+    learned (face vs neck), not a blind local pixel search. Using it
+    directly beats reconstructing the same boundary from a landmark
+    position and gradient-snapping along a short search line, which has
+    no such understanding and can grab a stronger but wrong nearby edge
+    (glasses, a collar seam, a shirt pattern) instead of the real,
+    sometimes subtle, jaw shadow.
 
     smoothing=0.5 (up from the function default of 0.15): the segmenter's
     pixel-to-pixel boundary along the jaw has real per-pixel jitter that a
@@ -1674,7 +1780,10 @@ def structure_composite(photo_path: Path, out_path: Path):
     detail_width = max(1, round(DETAIL_WIDTH * stroke_scale(w, h)))
 
     out_im = Image.fromarray(out)
-    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=detail_width)
+    if landmarks is not None:
+        out_im = draw_smooth_open_stroke(out_im, list(face_oval_contour(landmarks, w, h)), width=detail_width)
+    else:
+        out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=detail_width)
     out = np.array(out_im)
 
     if landmarks is not None:
@@ -1712,7 +1821,10 @@ def scaffold_composite(photo_path: Path, out_path: Path, mask_path: Path, glasse
     detail_width = max(1, round(DETAIL_WIDTH * scale))
 
     out_im = Image.fromarray(out)
-    out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=detail_width)
+    if landmarks is not None:
+        out_im = draw_smooth_open_stroke(out_im, list(face_oval_contour(landmarks, w, h)), width=detail_width)
+    else:
+        out_im = draw_smooth_strokes(out_im, face_skin_contours(cat_mask), width=detail_width)
     out_im = draw_dark_face_detail(
         out_im, cat_mask, gray, foreground, landmarks, detail_width=detail_width, scale=scale, glasses=glasses
     )
