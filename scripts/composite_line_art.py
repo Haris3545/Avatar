@@ -829,10 +829,30 @@ def draw_collar_hint(canvas: Image.Image, clothes_outer, detail_width: float) ->
     bbox_h = contour[:, 1].max() - top_y
     cx, cy = contour[:, 0].mean(), contour[:, 1].mean()
 
-    band = contour[contour[:, 1] < top_y + bbox_h * 0.12]
-    if len(band) < 6:
+    # Sorting by x (the old approach) assumes the top band is a simple
+    # left-to-right sweep, which breaks at a V-neck collar: the collar's
+    # two edges dip down and back up, so a point on one edge and a point
+    # on the other can share nearly the same x while being far apart in
+    # y. Re-sorting by x then treats those as adjacent, drawing a stroke
+    # that crosses back on itself right at the collar notch -- confirmed
+    # directly, a stray short double-tick mark right where the collar
+    # dips. contour is already ordered along the actual perimeter (from
+    # cv2's contour walk), so instead take the single longest contiguous
+    # run of in-band points in that real path order, which follows the
+    # true shoulder-to-collar-to-shoulder route including the dip,
+    # rather than reconstructing a path from scratch.
+    in_band = contour[:, 1] < top_y + bbox_h * 0.12
+    if in_band.sum() < 6:
         return canvas
-    band = band[np.argsort(band[:, 0])]
+    n = len(contour)
+    idx2 = np.concatenate([np.where(in_band)[0], np.where(in_band)[0] + n])
+    splits = np.where(np.diff(idx2) > 1)[0]
+    run_starts = np.concatenate([[0], splits + 1])
+    run_ends = np.concatenate([splits, [len(idx2) - 1]])
+    run_lengths = run_ends - run_starts
+    best = np.argmax(run_lengths)
+    best_idx = idx2[run_starts[best]:run_ends[best] + 1] % n
+    band = contour[best_idx]
 
     inset = bbox_h * 0.045
     pts = []
@@ -945,6 +965,19 @@ def reveal_ears(hair_clothes: np.ndarray, cat_mask: np.ndarray, im: Image.Image,
         notch_kernel = disk(max(2, int(radius * 0.08)))
         ear_notch = ndimage.binary_closing(ear_notch, structure=notch_kernel)
         ear_notch = ndimage.binary_opening(ear_notch, structure=notch_kernel)
+        # The 0.08 kernel above only clears pixel-level jaggedness; a real
+        # ear's actual anatomy (tragus notch, helix fold) still leaves the
+        # blob's own boundary jagged at a coarser scale, which traced
+        # straight into the outer silhouette as a thin spike/fork poking
+        # out of the hair mass where none belongs (confirmed directly:
+        # persisted with glasses drawing off, so it wasn't a glasses
+        # detection artifact bleeding in -- this notch's own shape was
+        # the source). A second, larger rounding pass smooths that coarser
+        # jaggedness into a plain ear-sized blob before it ever reaches
+        # the outer contour.
+        round_kernel = disk(max(3, int(radius * 0.22)))
+        ear_notch = ndimage.binary_closing(ear_notch, structure=round_kernel)
+        ear_notch = ndimage.binary_opening(ear_notch, structure=round_kernel)
         labeled, num = ndimage.label(ear_notch)
         if num > 1:
             sizes = ndimage.sum(ear_notch, labeled, range(1, num + 1))
@@ -1175,6 +1208,23 @@ def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.nd
         pad_x, pad_y = (max(xs) - min(xs)) * 0.35, (max(ys) - min(ys)) * 1.4
         gx0, gx1 = min(xs) - pad_x, max(xs) + pad_x
         gy0, gy1 = min(ys) - pad_y, max(ys) + pad_y
+
+        # 0.35x padding is generous enough that on a close-up photo it can
+        # reach past the temple hinge into the ear itself -- confirmed
+        # directly, the glasses region's x-bounds overshot landmarks
+        # 127/356 (the face oval's own temple points, right where cheek
+        # meets ear) by ~18px on this photo. Once that happens, the dark
+        # temple arm + ear shadow + any hair overlap get morphologically
+        # closed into the same blob as the actual lens/frame and traced as
+        # one shape, which is what was producing a garbled scribble where
+        # the ear should be instead of a clean lens outline. Clamping to
+        # just inside those temple landmarks keeps the search wide enough
+        # for the lens/frame (which sits well inside them) while making it
+        # structurally impossible to reach the ear, regardless of how wide
+        # any given photo's eyebrow-to-eyebrow span is relative to it.
+        temple_margin = (max(xs) - min(xs)) * 0.05
+        gx0 = max(gx0, landmarks[127].x * w + temple_margin)
+        gx1 = min(gx1, landmarks[356].x * w - temple_margin)
         glasses_region = np.zeros(gray_norm.shape, dtype=bool)
         glasses_region[int(gy0) : int(gy1), int(gx0) : int(gx1)] = True
     else:
@@ -1215,6 +1265,25 @@ def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.nd
     glasses_raw = glasses_region & foreground & (gray_norm < 120)
     if glasses and glasses_raw.any():
         glasses_closed = ndimage.binary_closing(glasses_raw, structure=disk(max(2, round(5 * scale))))
+
+        # A real glasses frame closes into one or two main blobs (the
+        # lenses, joined at the bridge or not); other things this same
+        # brightness threshold catches nearby -- most visibly the small
+        # dark hinge screw where the frame meets the temple arm -- close
+        # into their own separate, much smaller blob rather than merging
+        # into the frame, and were getting traced as their own stray loop
+        # right next to the lens (confirmed directly against a render:
+        # a small teardrop mark hanging off the frame's outer edge, with
+        # no such feature in the reference style). Keeping only
+        # components at least 15% of the largest one's area drops those
+        # without needing the closing kernel large enough to risk
+        # re-merging with the ear/temple region next to it.
+        labeled, n = ndimage.label(glasses_closed)
+        if n > 0:
+            sizes = ndimage.sum(glasses_closed, labeled, range(1, n + 1))
+            keep = np.where(sizes >= sizes.max() * 0.15)[0] + 1
+            glasses_closed = np.isin(labeled, keep)
+
         glasses_outer, glasses_holes = smooth_contours(
             glasses_closed, min_area_frac=0.0006, include_holes=True, smoothing=0.4
         )
@@ -1278,8 +1347,29 @@ def face_skin_contours(cat_mask: np.ndarray):
     pixel-to-pixel boundary along the jaw has real per-pixel jitter that a
     light smoothing pass leaves visible as a wobble rather than a clean
     curve -- this is the same fix already applied to the hair/clothes/
-    silhouette contours below, just also needed here."""
-    return smooth_contours(cat_mask == FACE_SKIN, min_area_frac=0.01, smoothing=0.5)
+    silhouette contours below, just also needed here.
+
+    A shadow crossing the face (glasses temple arm, a stray eyebrow-height
+    crease) can split FACE_SKIN into two disconnected blobs -- the main
+    face mass, and a smaller one near the temple/cheek that's still
+    genuinely face skin, just cut off from the rest by a thin dark gap.
+    Tracing both separately (the old behavior here) draws the smaller
+    blob's own ragged edge as its own closed shape, which is what a
+    stray fork/hook near the temple traced back to: not a bug in the
+    tracing itself, but two real but disconnected regions both getting
+    the same "confident single line" treatment a single simple region
+    would. A closing bridges gaps that are actually gaps (not real
+    concavities -- a real concavity is wider than a shadow line, and
+    survives a small closing), then only the single largest resulting
+    blob is kept, since the face is one contiguous region and anything
+    else this small at this stage is noise, not a second face part."""
+    face_skin = cat_mask == FACE_SKIN
+    face_skin = ndimage.binary_closing(face_skin, structure=disk(6))
+    labeled, num = ndimage.label(face_skin)
+    if num > 1:
+        sizes = ndimage.sum(face_skin, labeled, range(1, num + 1))
+        face_skin = labeled == (np.argmax(sizes) + 1)
+    return smooth_contours(face_skin, min_area_frac=0.01, smoothing=0.5)
 
 
 def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: int, h: int, detail_width: float = DETAIL_WIDTH) -> np.ndarray:
