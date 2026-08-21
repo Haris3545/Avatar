@@ -1714,19 +1714,21 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
         tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
         xs, ys = splev(np.linspace(0.0, 1.0, 60), tck)
 
-    # Trimmed to roughly the middle 4/5ths of its own width (was 3/5ths --
-    # that cut off too much) -- a direct style comparison against a
-    # reference avatar showed the nose there is deliberately less
-    # descriptive than a corner-to-corner trace, covering only the
-    # central portion rather than the full nostril-to-nostril span. xs
-    # isn't necessarily sorted (it follows the traced arc's real path
-    # order), so filter by x-range rather than by index; the arc is
-    # monotonic enough in x that this still leaves a contiguous,
-    # sensibly-ordered middle run for the stroke below to draw as one
-    # continuous line.
+    # Only trims the very ends -- a direct comparison marked up on this
+    # photo (red curve + blue nostril-height ticks) showed the line
+    # should hook all the way up to nostril height at each end, not stop
+    # partway down. Checking the untrimmed traced arc against MediaPipe's
+    # own nostril-wing landmarks (49/279) confirmed the parser's "nose"
+    # mask boundary already reaches that height on its own -- the earlier
+    # 4/5ths trim was what cut the hooks short, not a limit of the mask
+    # itself, so no extra nostril-specific model is needed here. xs isn't
+    # necessarily sorted (it follows the traced arc's real path order),
+    # so filter by x-range rather than by index; the arc is monotonic
+    # enough in x that this still leaves a contiguous, sensibly-ordered
+    # middle run for the stroke below to draw as one continuous line.
     xs, ys = np.asarray(xs), np.asarray(ys)
     x_span = xs.max() - xs.min()
-    keep = (xs > xs.min() + x_span * 0.1) & (xs < xs.max() - x_span * 0.1)
+    keep = (xs > xs.min() + x_span * 0.02) & (xs < xs.max() - x_span * 0.02)
     if keep.sum() >= 2:
         xs, ys = xs[keep], ys[keep]
     # Constant-width with round caps, not tapered -- a direct correction
