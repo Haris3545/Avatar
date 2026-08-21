@@ -1697,7 +1697,16 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
     try:
         parsing_mask, parsing_crop_box = parse_face_regions(im, landmarks, w, h)
         nose_pts = vector_trace_bottom_arc(parsing_mask, FACE_PARSING_CLASS["nose"], parsing_crop_box)
-        xs, ys = nose_pts[:, 0], nose_pts[:, 1]
+        # A light re-smoothing pass -- vtracer's own trace is already a
+        # spline fit, but it's fit to the parsing mask's real boundary
+        # noise (the mask itself has small pixel-level jitter), which
+        # shows up as a slightly wavy rather than fluid line. A small
+        # nonzero smoothing factor (not the exact-fit s=0 used elsewhere)
+        # softens just that small-scale waviness without changing the
+        # curve's actual position or overall shape -- confirmed against a
+        # hand-drawn reference showing the nose as one smooth stroke.
+        nose_tck, _ = splprep([nose_pts[:, 0], nose_pts[:, 1]], s=len(nose_pts) * 0.5, k=3)
+        xs, ys = splev(np.linspace(0.0, 1.0, len(nose_pts)), nose_tck)
     except Exception as e:
         print(f"Face-parsing nose trace failed ({e}); falling back to landmark spline")
         nose_bottom_idx = [49, 129, 64, 98, 97, 2, 326, 327, 294, 358, 279]
