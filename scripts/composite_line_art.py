@@ -1705,7 +1705,7 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
         # softens just that small-scale waviness without changing the
         # curve's actual position or overall shape -- confirmed against a
         # hand-drawn reference showing the nose as one smooth stroke.
-        nose_tck, _ = splprep([nose_pts[:, 0], nose_pts[:, 1]], s=len(nose_pts) * 0.5, k=3)
+        nose_tck, _ = splprep([nose_pts[:, 0], nose_pts[:, 1]], s=len(nose_pts) * 0.03, k=3)
         xs, ys = splev(np.linspace(0.0, 1.0, len(nose_pts)), nose_tck)
     except Exception as e:
         print(f"Face-parsing nose trace failed ({e}); falling back to landmark spline")
