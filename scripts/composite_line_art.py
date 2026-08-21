@@ -361,7 +361,7 @@ def vector_trace_bottom_arc(mask_crop: np.ndarray, class_id: int, crop_box, upsc
     return bottom_full
 
 
-def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
+def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int, detail_width: float = DETAIL_WIDTH) -> np.ndarray:
     """Replace traced eye detail with the house style's extreme
     simplification: a solid dot for the pupil and a single curved arc for
     the upper eyelid, positioned and scaled from real landmark geometry
@@ -406,17 +406,18 @@ def draw_dot_eyes(out: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
         # over the pupil is what actually makes it read as an eyelid with
         # an eye underneath, matching reference avatars where the pupil
         # sits snugly inside the lid curve's concavity rather than
-        # floating separately below an unrelated bar. Drawn as a tapered
-        # stroke (thin at the corners, slightly thicker mid-arc) for the
-        # same brush-stroke confidence as the eyebrow above it, and
-        # brought closer to the pupil than the old bar's gap.
+        # floating separately below an unrelated bar. Constant width
+        # (detail_width, the same as every other facial mark) instead of
+        # tapered -- a direct comparison against a reference avatar's face
+        # confirmed every stroke there is the same confident weight with
+        # no taper anywhere, and this was the last facial mark still
+        # tapered and sized off eye_width instead of detail_width.
         lid_half_w = eye_width * 0.24
         lid_y = cy - eye_width * 0.15
-        lid_w = max(eye_width * 0.16, 2)
         bulge = eye_width * 0.07
         arc_t = np.linspace(-1.0, 1.0, 7)
         arc_pts = [(cx + t * lid_half_w, lid_y - bulge * (1 - t**2)) for t in arc_t]
-        img = draw_tapered_stroke(img, arc_pts, mid_width=lid_w, end_width=max(1, lid_w * 0.5))
+        img = draw_smooth_open_stroke(img, arc_pts, width=detail_width)
 
     return np.array(img)
 
@@ -625,38 +626,6 @@ def draw_smooth_strokes(canvas: Image.Image, contours, width: int = 4, supersamp
         draw.line(closed, fill=(0, 0, 0, 255), width=stroke_w, joint="curve")
         for px, py in scaled:
             draw.ellipse([px - r, py - r, px + r, py + r], fill=(0, 0, 0, 255))
-
-    big = big.resize((w, h), Image.LANCZOS)
-    canvas.paste(big, (0, 0), big)
-    return canvas
-
-
-def draw_tapered_stroke(canvas: Image.Image, points, mid_width: float, end_width: float, supersample: int = 6) -> Image.Image:
-    """Draw a single open stroke whose width tapers from end_width at each
-    tip up to mid_width at its center, like a brush stroke -- unlike
-    draw_smooth_strokes' constant width, this is for facial marks (an
-    eyebrow) that read as hand-drawn precisely because they're thicker in
-    the middle and thin out at the ends, not a uniform-diameter line.
-    Approximated as a chain of overlapping circles sized per-point along
-    the path, supersampled and downsampled for anti-aliasing like the
-    other stroke helpers here."""
-    if len(points) < 2:
-        return canvas
-
-    w, h = canvas.size
-    big = Image.new("RGBA", (w * supersample, h * supersample), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(big)
-    n = len(points)
-    for i, (px, py) in enumerate(points):
-        # Triangular taper: 0 at both ends, 1 at the midpoint.
-        t = i / (n - 1)
-        taper = 1 - abs(t - 0.5) * 2
-        radius = (end_width + (mid_width - end_width) * taper) / 2 * supersample
-        sx, sy = px * supersample, py * supersample
-        draw.ellipse([sx - radius, sy - radius, sx + radius, sy + radius], fill=(0, 0, 0, 255))
-        if i > 0:
-            px0, py0 = points[i - 1]
-            draw.line([(px0 * supersample, py0 * supersample), (sx, sy)], fill=(0, 0, 0, 255), width=max(int(radius * 1.6), 1))
 
     big = big.resize((w, h), Image.LANCZOS)
     canvas.paste(big, (0, 0), big)
@@ -1431,7 +1400,7 @@ def composite_line_art(photo_path: Path, out_path: Path, glasses: bool = False):
 
     if landmarks is not None:
         out = draw_face_structure_lines(out, im, landmarks, w, h, detail_width=detail_width)
-        out = draw_dot_eyes(out, landmarks, w, h)
+        out = draw_dot_eyes(out, landmarks, w, h, detail_width=detail_width)
     else:
         print("No face detected, skipping face structure lines and dot-eye replacement")
 
@@ -1618,7 +1587,15 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
 
     connections = vision.FaceLandmarksConnections
     img = Image.fromarray(out)
-    line_width = max(1, detail_width - 1)
+    # One constant width for every facial mark -- eyebrows, nose, mouth,
+    # ear fold alike -- instead of each drawn at its own slightly
+    # different offset from detail_width (-2 here, -1 there, +1
+    # elsewhere) plus some of them tapered and some not. A direct
+    # comparison against a reference avatar's face confirmed that's what
+    # actually reads as "polished": every stroke on the face is the exact
+    # same confident weight, no thin/thick disparity between features and
+    # no taper anywhere, not a stylistic choice specific to any one mark.
+    line_width = detail_width
 
     def ordered_points(conns):
         """FACE_LANDMARKS_*_EYEBROW is a set of disjoint segment pairs, not a
@@ -1694,7 +1671,7 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
         else:
             raw_pts = raw_pts[:-2]
         pts = [(px, py - brow_lift) for px, py in raw_pts]
-        img = draw_tapered_stroke(img, pts, mid_width=detail_width + 1, end_width=max(1, detail_width - 1))
+        img = draw_smooth_open_stroke(img, pts, width=line_width)
 
     # Just the line under the nose (nostril hook to nostril hook), not the
     # full nose mesh (bridge + nostril wings + tip outline) -- matches the
@@ -1749,7 +1726,7 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
     # instead. draw_smooth_open_stroke already draws round caps (an
     # ellipse at each endpoint), it just doesn't vary the width along
     # the path the way draw_tapered_stroke does.
-    img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=max(1, line_width - 1))
+    img = draw_smooth_open_stroke(img, list(zip(xs, ys)), width=line_width)
 
     # No philtrum tick -- removed per direct feedback ("that weird line
     # below the nose").
@@ -1830,7 +1807,7 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
         fold_bow = eye_span * 0.012
         t = np.linspace(-1.0, 1.0, 5)
         fold_pts = [(ex + side * fold_bow * (1 - tt**2), ey + tt * fold_len * 0.5) for tt in t]
-        img = draw_smooth_open_stroke(img, fold_pts, width=max(1, line_width - 1))
+        img = draw_smooth_open_stroke(img, fold_pts, width=line_width)
 
     return np.array(img)
 
@@ -1859,7 +1836,7 @@ def structure_composite(photo_path: Path, out_path: Path):
 
     if landmarks is not None:
         out = draw_face_structure_lines(out, im, landmarks, w, h, detail_width=detail_width)
-        out = draw_dot_eyes(out, landmarks, w, h)
+        out = draw_dot_eyes(out, landmarks, w, h, detail_width=detail_width)
     else:
         print("No face detected, skipping face structure lines")
 
@@ -1909,7 +1886,7 @@ def scaffold_composite(photo_path: Path, out_path: Path, mask_path: Path, glasse
     # which is what was actually producing the stubble/gap artifacts.
     if landmarks is not None:
         out = draw_face_structure_lines(np.array(out_im), im, landmarks, w, h, detail_width=detail_width)
-        out = draw_dot_eyes(out, landmarks, w, h)
+        out = draw_dot_eyes(out, landmarks, w, h, detail_width=detail_width)
     else:
         print("No face detected, skipping face structure lines and dot-eye replacement")
         out = np.array(out_im)
