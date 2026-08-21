@@ -1714,21 +1714,27 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
         tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
         xs, ys = splev(np.linspace(0.0, 1.0, 60), tck)
 
-    # Trimmed to roughly the middle 4/5ths of its own width. A first
-    # attempt at "the nose should reach the nostrils" loosened this trim
-    # to 0.02, reasoning the untrimmed arc's hooks already reached
-    # nostril-wing landmark height -- but a follow-up correction with a
-    # hand-drawn overlay showed that was the wrong read: "up to the
-    # nostrils" meant the base of the nostril (this trimmed line's own
-    # endpoint), not tracing further up along the sides of the nose.
-    # Restored to 4/5ths. xs isn't necessarily sorted (it follows the
-    # traced arc's real path order), so filter by x-range rather than by
-    # index; the arc is monotonic enough in x that this still leaves a
-    # contiguous, sensibly-ordered middle run for the stroke below to
-    # draw as one continuous line.
+    # Only trims a sliver at the very tip (numerical noise from vtracer's
+    # own extrema detection), not a real fraction of the width. A
+    # hand-drawn M-shape overlay -- red desired curve vs. the yellow/blue
+    # rendered one, on the actual photo -- showed the rendered line
+    # undershooting at both ends compared to the reference, twice: first
+    # explained as "reach nostril-wing landmark height" (trim 0.1 -> 0.02,
+    # reverted as still not tall enough / wrong read), then re-explained
+    # directly as "should go higher, to make this M shape, where the
+    # outside lines are shorter" -- i.e. short horizontally but tall,
+    # not a long gradual trace up the side of the nose. A trim sweep
+    # confirmed the untrimmed arc's own natural hook (no trim at all)
+    # is what matches that reference: it rises sharply right where the
+    # nostril meets the cheek, short and steep, which a 0.1 or even 0.02
+    # fractional trim was cutting away. xs isn't necessarily sorted (it
+    # follows the traced arc's real path order), so filter by x-range
+    # rather than by index; the arc is monotonic enough in x that this
+    # still leaves a contiguous, sensibly-ordered run for the stroke
+    # below to draw as one continuous line.
     xs, ys = np.asarray(xs), np.asarray(ys)
     x_span = xs.max() - xs.min()
-    keep = (xs > xs.min() + x_span * 0.1) & (xs < xs.max() - x_span * 0.1)
+    keep = (xs > xs.min() + x_span * 0.01) & (xs < xs.max() - x_span * 0.01)
     if keep.sum() >= 2:
         xs, ys = xs[keep], ys[keep]
     # Constant-width with round caps, not tapered -- a direct correction
