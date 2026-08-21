@@ -1714,21 +1714,21 @@ def draw_face_structure_lines(out: np.ndarray, im: Image.Image, landmarks, w: in
         tck, _ = splprep([pts[:, 0], pts[:, 1]], s=0, k=3)
         xs, ys = splev(np.linspace(0.0, 1.0, 60), tck)
 
-    # Only trims the very ends -- a direct comparison marked up on this
-    # photo (red curve + blue nostril-height ticks) showed the line
-    # should hook all the way up to nostril height at each end, not stop
-    # partway down. Checking the untrimmed traced arc against MediaPipe's
-    # own nostril-wing landmarks (49/279) confirmed the parser's "nose"
-    # mask boundary already reaches that height on its own -- the earlier
-    # 4/5ths trim was what cut the hooks short, not a limit of the mask
-    # itself, so no extra nostril-specific model is needed here. xs isn't
-    # necessarily sorted (it follows the traced arc's real path order),
-    # so filter by x-range rather than by index; the arc is monotonic
-    # enough in x that this still leaves a contiguous, sensibly-ordered
-    # middle run for the stroke below to draw as one continuous line.
+    # Trimmed to roughly the middle 4/5ths of its own width. A first
+    # attempt at "the nose should reach the nostrils" loosened this trim
+    # to 0.02, reasoning the untrimmed arc's hooks already reached
+    # nostril-wing landmark height -- but a follow-up correction with a
+    # hand-drawn overlay showed that was the wrong read: "up to the
+    # nostrils" meant the base of the nostril (this trimmed line's own
+    # endpoint), not tracing further up along the sides of the nose.
+    # Restored to 4/5ths. xs isn't necessarily sorted (it follows the
+    # traced arc's real path order), so filter by x-range rather than by
+    # index; the arc is monotonic enough in x that this still leaves a
+    # contiguous, sensibly-ordered middle run for the stroke below to
+    # draw as one continuous line.
     xs, ys = np.asarray(xs), np.asarray(ys)
     x_span = xs.max() - xs.min()
-    keep = (xs > xs.min() + x_span * 0.02) & (xs < xs.max() - x_span * 0.02)
+    keep = (xs > xs.min() + x_span * 0.1) & (xs < xs.max() - x_span * 0.1)
     if keep.sum() >= 2:
         xs, ys = xs[keep], ys[keep]
     # Constant-width with round caps, not tapered -- a direct correction
