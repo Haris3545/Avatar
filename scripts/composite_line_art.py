@@ -1415,6 +1415,20 @@ def composite_line_art(photo_path: Path, out_path: Path, glasses: bool = False):
     )
     out = np.array(out_im)
 
+    # Retrace the structural layer only (silhouette/hair/clothes/jaw/
+    # glasses) -- see vector_retrace's docstring for why near-duplicate-
+    # line seams show up specifically there. The finer facial marks added
+    # next (eyebrows, nose, mouth, ear folds) are each already a single,
+    # clean supersampled stroke with a proper round cap; retracing them
+    # too was actually squaring those caps off instead (vtracer's curve
+    # fitting doesn't preserve small circular detail well at this scale,
+    # confirmed directly against a render and not fixable by tuning its
+    # corner-threshold/speckle-filter parameters), which doesn't match a
+    # real reference avatar's rounded stroke ends. Adding them after the
+    # retrace, on the by-then-already-clean structural base, keeps both:
+    # no seams on the structural layer, real round caps on the marks.
+    out = vector_retrace(out)
+
     if landmarks is not None:
         out = draw_face_structure_lines(out, im, landmarks, w, h, detail_width=detail_width)
         out = draw_dot_eyes(out, landmarks, w, h)
@@ -1422,7 +1436,6 @@ def composite_line_art(photo_path: Path, out_path: Path, glasses: bool = False):
         print("No face detected, skipping face structure lines and dot-eye replacement")
 
     out, _ = crop_to_content(out, foreground)
-    out = vector_retrace(out)
     Image.fromarray(out).save(out_path)
     print(f"Saved to {out_path}")
 
