@@ -606,6 +606,83 @@ def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0004, samples: int
     return outer, holes
 
 
+def trace_glasses_contours(mask: np.ndarray, epsilon_frac: float = 0.006, smoothing: float = 0.05, defect_depth_frac: float = 0.12):
+    """Like smooth_contours(include_holes=True), but built specifically for
+    a manufactured, geometric shape (a glasses frame) rather than an
+    organic one: a much larger epsilon_frac and much smaller smoothing
+    than smooth_contours' defaults, so real corners stay crisp turns
+    instead of being rounded into the same soft blob a hair/silhouette
+    contour wants.
+
+    Also actively removes deep, narrow inward notches via convexity-defect
+    detection before smoothing: a real photo's glasses region routinely
+    has a thin dark nose-pad/hinge wire threading in from the frame toward
+    the lens interior (confirmed directly -- it isn't a segmentation
+    fluke, it's real dark material in the crop, positioned well clear of
+    the eyebrows), which the ordinary contour of the lens hole then has to
+    detour around, showing up as an ugly self-crossing loop right at the
+    inner corner of each lens once traced and smoothed. A real glasses
+    lens opening is convex (a rounded rectangle), so a hull-relative
+    defect deeper than defect_depth_frac of the shape's own diagonal is
+    unambiguously that stray wire, not genuine lens-opening geometry --
+    bridging straight across it (dropping the points strictly between the
+    defect's start and end) removes exactly that notch while leaving the
+    rest of the boundary's real shape untouched."""
+    import cv2
+    from scipy.interpolate import splev, splprep
+
+    mask_u8 = mask.astype(np.uint8) * 255
+    contours, hierarchy = cv2.findContours(mask_u8, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return [], []
+
+    def bridge_deep_defects(contour):
+        contour = contour.reshape(-1, 1, 2).astype(np.int32)
+        hull_idx = np.sort(cv2.convexHull(contour, returnPoints=False).flatten())
+        if len(hull_idx) < 3:
+            return contour.reshape(-1, 2).astype(np.float64)
+        defects = cv2.convexityDefects(contour, hull_idx.reshape(-1, 1))
+        pts = contour.reshape(-1, 2)
+        if defects is None:
+            return pts.astype(np.float64)
+        diag = np.hypot(*(pts.max(0) - pts.min(0)))
+        n = len(pts)
+        skip = np.zeros(n, dtype=bool)
+        for s, e, _f, d in defects:
+            if d / 256.0 <= diag * defect_depth_frac:
+                continue
+            i = (s + 1) % n
+            while i != e:
+                skip[i] = True
+                i = (i + 1) % n
+        return pts[~skip].astype(np.float64)
+
+    def smooth_one(contour):
+        pts = bridge_deep_defects(contour.astype(np.float32))
+        peri = cv2.arcLength(pts.reshape(-1, 1, 2).astype(np.float32), True)
+        approx = cv2.approxPolyDP(pts.reshape(-1, 1, 2).astype(np.float32), epsilon_frac * peri, True).squeeze(1)
+        if approx.shape[0] < 4:
+            return None
+        x, y = approx[:, 0].astype(np.float64), approx[:, 1].astype(np.float64)
+        try:
+            tck, _ = splprep([x, y], s=len(x) * smoothing, per=True)
+            xs, ys = splev(np.linspace(0, 1, 300), tck)
+            return np.stack([xs, ys], axis=1)
+        except Exception:
+            return approx
+
+    outer, holes = [], []
+    for idx, contour in enumerate(contours):
+        if cv2.contourArea(contour) < mask.size * 0.0006:
+            continue
+        smoothed = smooth_one(contour)
+        if smoothed is None:
+            continue
+        parent = hierarchy[0][idx][3]
+        (outer if parent == -1 else holes).append(smoothed)
+    return outer, holes
+
+
 def draw_smooth_strokes(canvas: Image.Image, contours, width: int = 4, supersample: int = 6) -> Image.Image:
     """Render each closed point path as a single anti-aliased stroke with
     rounded joins, by drawing it oversized on a supersampled layer and
@@ -1343,9 +1420,7 @@ def draw_dark_face_detail(out_im: Image.Image, cat_mask: np.ndarray, gray: np.nd
             keep = np.where(sizes >= sizes.max() * 0.15)[0] + 1
             glasses_closed = np.isin(labeled, keep)
 
-        glasses_outer, glasses_holes = smooth_contours(
-            glasses_closed, min_area_frac=0.0006, include_holes=True, smoothing=0.4
-        )
+        glasses_outer, glasses_holes = trace_glasses_contours(glasses_closed)
         # No extra bump over detail_width anymore (was +2) -- that made
         # sense back when detail_width was thin (3) and glasses needed to
         # stand out as visibly bolder, but detail_width itself is now
