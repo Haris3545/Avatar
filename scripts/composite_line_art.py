@@ -606,7 +606,7 @@ def smooth_contours(mask: np.ndarray, epsilon_frac: float = 0.0004, samples: int
     return outer, holes
 
 
-def trace_glasses_contours(mask: np.ndarray, epsilon_frac: float = 0.006, smoothing: float = 0.05, defect_depth_frac: float = 0.12, ring_thickness: int = 8):
+def trace_glasses_contours(mask: np.ndarray, epsilon_frac: float = 0.006, smoothing: float = 0.05, defect_depth_frac: float = 0.12):
     """Like smooth_contours(include_holes=True), but built specifically for
     a manufactured, geometric shape (a glasses frame) rather than an
     organic one: a much larger epsilon_frac and much smaller smoothing
@@ -627,21 +627,8 @@ def trace_glasses_contours(mask: np.ndarray, epsilon_frac: float = 0.006, smooth
     unambiguously that stray wire, not genuine lens-opening geometry --
     bridging straight across it (dropping the points strictly between the
     defect's start and end) removes exactly that notch while leaving the
-    rest of the boundary's real shape untouched.
-
-    Each hole is then rebuilt as a fixed ring_thickness inset of the
-    (already-cleaned) outer boundary, rather than traced from the mask's
-    own raw hole pixels directly. The raw frame's real thickness varies
-    around its own boundary (confirmed directly: ~8px at the bottom rim
-    on one photo vs. a couple px elsewhere), and drawing outer/hole as two
-    independent constant-width strokes leaves a visible gap -- rendered as
-    a stray extra line -- wherever the true gap between them exceeds the
-    stroke width. Insetting the hole from the outer by a constant amount
-    everywhere guarantees a uniform apparent frame thickness instead,
-    which also reads as the more confident, manufactured look a real
-    frame has."""
+    rest of the boundary's real shape untouched."""
     import cv2
-    from scipy import ndimage
     from scipy.interpolate import splev, splprep
 
     mask_u8 = mask.astype(np.uint8) * 255
@@ -670,10 +657,8 @@ def trace_glasses_contours(mask: np.ndarray, epsilon_frac: float = 0.006, smooth
                 i = (i + 1) % n
         return pts[~skip].astype(np.float64)
 
-    def clean_pts(contour):
-        return bridge_deep_defects(contour.astype(np.float32))
-
-    def smooth_pts(pts):
+    def smooth_one(contour):
+        pts = bridge_deep_defects(contour.astype(np.float32))
         peri = cv2.arcLength(pts.reshape(-1, 1, 2).astype(np.float32), True)
         approx = cv2.approxPolyDP(pts.reshape(-1, 1, 2).astype(np.float32), epsilon_frac * peri, True).squeeze(1)
         if approx.shape[0] < 4:
@@ -686,42 +671,16 @@ def trace_glasses_contours(mask: np.ndarray, epsilon_frac: float = 0.006, smooth
         except Exception:
             return approx
 
-    min_area = mask.size * 0.0006
-    outer_raw, hole_raw = None, []
+    outer, holes = [], []
     for idx, contour in enumerate(contours):
-        if cv2.contourArea(contour) < min_area:
+        if cv2.contourArea(contour) < mask.size * 0.0006:
             continue
-        if hierarchy[0][idx][3] == -1:
-            if outer_raw is None or cv2.contourArea(contour) > cv2.contourArea(outer_raw):
-                outer_raw = contour
-        else:
-            hole_raw.append(contour)
-    if outer_raw is None:
-        return [], []
-
-    outer_pts = clean_pts(outer_raw)
-    outer_smoothed = smooth_pts(outer_pts)
-    if outer_smoothed is None:
-        return [], []
-
-    outer_filled = np.zeros(mask.shape, dtype=np.uint8)
-    cv2.fillPoly(outer_filled, [outer_smoothed.round().astype(np.int32)], 1)
-    inset = ndimage.binary_erosion(outer_filled.astype(bool), structure=disk(ring_thickness))
-
-    holes = []
-    for contour in hole_raw:
-        hole_filled = np.zeros(mask.shape, dtype=np.uint8)
-        cv2.fillPoly(hole_filled, [contour.reshape(-1, 1, 2).astype(np.int32)], 1)
-        region = inset & ndimage.binary_dilation(hole_filled.astype(bool), structure=disk(3))
-        region_contours, _ = cv2.findContours(region.astype(np.uint8) * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        if not region_contours:
+        smoothed = smooth_one(contour)
+        if smoothed is None:
             continue
-        biggest = max(region_contours, key=cv2.contourArea)
-        smoothed = smooth_pts(biggest.astype(np.float64).squeeze(1))
-        if smoothed is not None:
-            holes.append(smoothed)
-
-    return [outer_smoothed], holes
+        parent = hierarchy[0][idx][3]
+        (outer if parent == -1 else holes).append(smoothed)
+    return outer, holes
 
 
 def draw_smooth_strokes(canvas: Image.Image, contours, width: int = 4, supersample: int = 6) -> Image.Image:
